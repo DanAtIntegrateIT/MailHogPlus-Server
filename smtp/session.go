@@ -121,10 +121,22 @@ func (c *Session) validateSender(from string) bool {
 func (c *Session) acceptMessage(msg *data.SMTPMessage) (id string, err error) {
 	m := msg.Parse(c.proto.Hostname)
 	setFolderHeader(m, c.authenticatedUsername)
+	persistMessageContentToRaw(m)
 	c.logf("Storing message %s", m.ID)
 	id, err = c.storage.Store(m)
 	c.messageChan <- m
 	return
+}
+
+func persistMessageContentToRaw(m *data.Message) {
+	if m == nil || m.Raw == nil {
+		return
+	}
+	b, err := io.ReadAll(m.Bytes())
+	if err != nil {
+		return
+	}
+	m.Raw.Data = string(b)
 }
 
 func extractAuthenticatedUsername(mechanism string, args ...string) string {

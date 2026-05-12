@@ -13,7 +13,6 @@ import (
 	"github.com/ian-kent/go-log/log"
 	"github.com/mailhog/MailHog-Server/config"
 	"github.com/mailhog/data"
-	"github.com/mailhog/storage"
 
 	"github.com/ian-kent/goose"
 )
@@ -124,21 +123,15 @@ func (apiv1 *APIv1) messages(w http.ResponseWriter, req *http.Request) {
 
 	apiv1.defaultOptions(w, req)
 
-	// TODO start, limit
-	switch apiv1.config.Storage.(type) {
-	case *storage.MongoDB:
-		messages, _ := apiv1.config.Storage.(*storage.MongoDB).List(0, 1000)
-		bytes, _ := json.Marshal(messages)
-		w.Header().Add("Content-Type", "text/json")
-		w.Write(bytes)
-	case *storage.InMemory:
-		messages, _ := apiv1.config.Storage.(*storage.InMemory).List(0, 1000)
-		bytes, _ := json.Marshal(messages)
-		w.Header().Add("Content-Type", "text/json")
-		w.Write(bytes)
-	default:
+	messages, err := apiv1.config.Storage.List(0, 1000)
+	if err != nil {
+		log.Printf("- Error: %s", err)
 		w.WriteHeader(500)
+		return
 	}
+	bytes, _ := json.Marshal(messages)
+	w.Header().Add("Content-Type", "text/json")
+	w.Write(bytes)
 }
 
 func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
@@ -174,26 +167,17 @@ func (apiv1 *APIv1) download(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "message/rfc822")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+".eml\"")
 
-	switch apiv1.config.Storage.(type) {
-	case *storage.MongoDB:
-		message, _ := apiv1.config.Storage.(*storage.MongoDB).Load(id)
-		for h, l := range message.Content.Headers {
-			for _, v := range l {
-				w.Write([]byte(h + ": " + v + "\r\n"))
-			}
-		}
-		w.Write([]byte("\r\n" + message.Content.Body))
-	case *storage.InMemory:
-		message, _ := apiv1.config.Storage.(*storage.InMemory).Load(id)
-		for h, l := range message.Content.Headers {
-			for _, v := range l {
-				w.Write([]byte(h + ": " + v + "\r\n"))
-			}
-		}
-		w.Write([]byte("\r\n" + message.Content.Body))
-	default:
+	message, err := apiv1.config.Storage.Load(id)
+	if err != nil || message == nil {
 		w.WriteHeader(500)
+		return
 	}
+	for h, l := range message.Content.Headers {
+		for _, v := range l {
+			w.Write([]byte(h + ": " + v + "\r\n"))
+		}
+	}
+	w.Write([]byte("\r\n" + message.Content.Body))
 }
 
 func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {

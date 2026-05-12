@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io/ioutil"
 	"net/http"
 	"sort"
 	"strconv"
@@ -52,6 +53,10 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("GET").HandlerFunc(apiv2.listOutgoingSMTP)
 	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
+	r.Path(conf.WebPath + "/api/v2/settings").Methods("GET").HandlerFunc(apiv2.getSettings)
+	r.Path(conf.WebPath + "/api/v2/settings").Methods("PUT").HandlerFunc(apiv2.updateSettings)
+	r.Path(conf.WebPath + "/api/v2/settings").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+
 	r.Path(conf.WebPath + "/api/v2/websocket").Methods("GET").HandlerFunc(apiv2.websocket)
 
 	go func() {
@@ -92,6 +97,19 @@ type foldersResponse struct {
 	Items []folderResult `json:"items"`
 }
 
+type settingsResponse struct {
+	RetentionDays   int    `json:"retentionDays"`
+	StorageType     string `json:"storageType"`
+	MaildirPath     string `json:"maildirPath"`
+	SettingsFile    string `json:"settingsFile"`
+	RequiresRestart bool   `json:"requiresRestart"`
+}
+
+type updateSettingsRequest struct {
+	RetentionDays int    `json:"retentionDays"`
+	StorageType   string `json:"storageType"`
+}
+
 const folderHeaderName = "X-MailHogPlus-Folder"
 
 func (apiv2 *APIv2) getStartLimit(w http.ResponseWriter, req *http.Request) (start, limit int) {
@@ -121,6 +139,7 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 
 	start, limit := apiv2.getStartLimit(w, req)
 	folder := strings.TrimSpace(req.URL.Query().Get("folder"))
+	apiv2.applyRetention()
 
 	var res messagesResult
 
@@ -202,6 +221,7 @@ func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	folder := strings.TrimSpace(req.URL.Query().Get("folder"))
+	apiv2.applyRetention()
 
 	var res messagesResult
 
@@ -239,6 +259,7 @@ func (apiv2 *APIv2) folders(w http.ResponseWriter, req *http.Request) {
 	log.Println("[APIv2] GET /api/v2/folders")
 
 	apiv2.defaultOptions(w, req)
+	apiv2.applyRetention()
 
 	messages, err := apiv2.listAllMessages()
 	if err != nil {
@@ -367,6 +388,87 @@ func (apiv2 *APIv2) listOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
 	w.Write(b)
 }
 
+func (apiv2 *APIv2) getSettings(w http.ResponseWriter, req *http.Request) {
+	log.Println("[APIv2] GET /api/v2/settings")
+	apiv2.defaultOptions(w, req)
+
+	res := settingsResponse{
+		RetentionDays:   apiv2.config.RetentionDays,
+		StorageType:     apiv2.config.StorageType,
+		MaildirPath:     apiv2.config.MaildirPath,
+		SettingsFile:    apiv2.config.SettingsFile,
+		RequiresRestart: false,
+	}
+	if apiv2.config.ManagedStorage != nil {
+		res.RetentionDays = apiv2.config.ManagedStorage.RetentionDays()
+	}
+
+	b, _ := json.Marshal(res)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(b)
+}
+
+func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
+	log.Println("[APIv2] PUT /api/v2/settings")
+	apiv2.defaultOptions(w, req)
+
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	var in updateSettingsRequest
+	if err := json.Unmarshal(body, &in); err != nil {
+		w.WriteHeader(400)
+		return
+	}
+	if in.RetentionDays <= 0 {
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":"retentionDays must be greater than 0"}`))
+		return
+	}
+
+	requiresRestart := false
+	apiv2.config.RetentionDays = in.RetentionDays
+	if apiv2.config.ManagedStorage != nil {
+		apiv2.config.ManagedStorage.SetRetentionDays(in.RetentionDays)
+		if err := apiv2.config.ManagedStorage.ApplyRetention(); err != nil {
+			w.WriteHeader(500)
+			return
+		}
+	}
+
+	storageType := strings.TrimSpace(in.StorageType)
+	if len(storageType) > 0 {
+		storageType = strings.ToLower(storageType)
+		if storageType != "memory" && storageType != "maildir" && storageType != "mongodb" {
+			w.WriteHeader(400)
+			w.Write([]byte(`{"error":"storageType must be one of: memory, maildir, mongodb"}`))
+			return
+		}
+		if apiv2.config.StorageType != storageType {
+			apiv2.config.StorageType = storageType
+			requiresRestart = true
+		}
+	}
+
+	if err := apiv2.config.SaveSettings(); err != nil {
+		w.WriteHeader(500)
+		return
+	}
+	res := settingsResponse{
+		RetentionDays:   apiv2.config.RetentionDays,
+		StorageType:     apiv2.config.StorageType,
+		MaildirPath:     apiv2.config.MaildirPath,
+		SettingsFile:    apiv2.config.SettingsFile,
+		RequiresRestart: requiresRestart,
+	}
+	b, _ := json.Marshal(res)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(b)
+}
+
 func (apiv2 *APIv2) websocket(w http.ResponseWriter, req *http.Request) {
 	log.Println("[APIv2] GET /api/v2/websocket")
 
@@ -390,6 +492,15 @@ func (apiv2 *APIv2) listAllMessages() ([]data.Message, error) {
 		return nil, err
 	}
 	return []data.Message(*messages), nil
+}
+
+func (apiv2 *APIv2) applyRetention() {
+	if apiv2.config.ManagedStorage == nil {
+		return
+	}
+	if err := apiv2.config.ManagedStorage.ApplyRetention(); err != nil {
+		log.Printf("[APIv2] Error applying retention policy: %s", err)
+	}
 }
 
 func filterMessagesByFolder(messages []data.Message, folder string) []data.Message {
