@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mailhog/MailHog-Server/config"
 	. "github.com/smartystreets/goconvey/convey"
 
 	"github.com/mailhog/data"
@@ -140,6 +141,47 @@ func TestValidateAuthentication(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 		So(c.authenticatedUsername, ShouldEqual, "thorlux")
+	})
+
+	Convey("validateAuthentication enforces non-empty allowed usernames when default inbox only is enabled", t, func() {
+		cfg := config.DefaultConfig()
+		cfg.ForceDefaultInboxOnly = true
+		cfg.DefaultFolders = []string{"Gateway", "Operations"}
+		c := &Session{config: cfg}
+
+		err, ok := c.validateAuthentication("PLAIN", "", "secret")
+		So(err, ShouldNotBeNil)
+		So(ok, ShouldBeFalse)
+		So(err.Status, ShouldEqual, 535)
+
+		err, ok = c.validateAuthentication("PLAIN", "UnknownFolder", "secret")
+		So(err, ShouldNotBeNil)
+		So(ok, ShouldBeFalse)
+		So(err.Status, ShouldEqual, 535)
+
+		err, ok = c.validateAuthentication("PLAIN", "gateway", "secret")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(c.authenticatedUsername, ShouldEqual, "gateway")
+	})
+}
+
+func TestSMTPVerbFilter(t *testing.T) {
+	Convey("smtpVerbFilter rejects MAIL before successful auth when default inbox only is enabled", t, func() {
+		cfg := config.DefaultConfig()
+		cfg.ForceDefaultInboxOnly = true
+		c := &Session{config: cfg}
+
+		reply := c.smtpVerbFilter("MAIL")
+		So(reply, ShouldNotBeNil)
+		So(reply.Status, ShouldEqual, 535)
+
+		reply = c.smtpVerbFilter("EHLO")
+		So(reply, ShouldBeNil)
+
+		c.authenticatedUsername = "Gateway"
+		reply = c.smtpVerbFilter("MAIL")
+		So(reply, ShouldBeNil)
 	})
 }
 

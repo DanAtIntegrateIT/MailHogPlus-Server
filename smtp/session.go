@@ -74,6 +74,7 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, cfg *config.Config, s
 	proto.ValidateSenderHandler = session.validateSender
 	proto.ValidateRecipientHandler = session.validateRecipient
 	proto.ValidateAuthenticationHandler = session.validateAuthentication
+	proto.SMTPVerbFilter = session.smtpVerbFilter
 	proto.GetAuthenticationMechanismsHandler = func() []string { return []string{"PLAIN"} }
 
 	session.logf("Starting session")
@@ -103,6 +104,16 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 		c.authenticatedUsername = username
 	}
 	return nil, true
+}
+
+func (c *Session) smtpVerbFilter(verb string, args ...string) (errorReply *smtp.Reply) {
+	if c.config == nil || !c.config.ForceDefaultInboxOnly {
+		return nil
+	}
+	if strings.EqualFold(verb, "MAIL") && len(strings.TrimSpace(c.authenticatedUsername)) == 0 {
+		return smtp.ReplyInvalidAuth()
+	}
+	return nil
 }
 
 func (c *Session) validateRecipient(to string) bool {
