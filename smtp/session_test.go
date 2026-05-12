@@ -163,6 +163,36 @@ func TestValidateAuthentication(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 		So(c.authenticatedUsername, ShouldEqual, "gateway")
+
+		err, ok = c.validateAuthentication("PLAIN", "gateway:jon", "secret")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(c.authenticatedUsername, ShouldEqual, "gateway:jon")
+
+		err, ok = c.validateAuthentication("PLAIN", "gateway:jon:legacy", "secret")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(c.authenticatedUsername, ShouldEqual, "gateway:jon:legacy")
+	})
+}
+
+func TestSplitAuthenticatedUsername(t *testing.T) {
+	Convey("splitAuthenticatedUsername splits folder and optional tags", t, func() {
+		folder, tags := splitAuthenticatedUsername("gateway2lease:jon")
+		So(folder, ShouldEqual, "gateway2lease")
+		So(tags, ShouldResemble, []string{"jon"})
+
+		folder, tags = splitAuthenticatedUsername("gateway")
+		So(folder, ShouldEqual, "gateway")
+		So(tags, ShouldResemble, []string{})
+
+		folder, tags = splitAuthenticatedUsername(" gateway : jon : legacy : jon ")
+		So(folder, ShouldEqual, "gateway")
+		So(tags, ShouldResemble, []string{"jon", "legacy"})
+
+		folder, tags = splitAuthenticatedUsername("gateway2lease%3Ajon%3Alegacy")
+		So(folder, ShouldEqual, "gateway2lease")
+		So(tags, ShouldResemble, []string{"jon", "legacy"})
 	})
 }
 
@@ -230,6 +260,33 @@ func TestAcceptMessageFolderHeader(t *testing.T) {
 		So(stored.Content.Headers[folderHeaderName], ShouldResemble, []string{"malachi"})
 	})
 
+	Convey("acceptMessage stores folder and tag headers when authenticated username has tags", t, func() {
+		mem := storage.CreateInMemory()
+		ch := make(chan *data.Message, 1)
+		c := &Session{
+			proto:                 &mhsmtp.Protocol{Hostname: "localhost"},
+			storage:               mem,
+			messageChan:           ch,
+			authenticatedUsername: "gateway2lease:jon:legacy",
+		}
+		msg := &data.SMTPMessage{
+			From: "sender@example.com",
+			To:   []string{"rcpt@example.com"},
+			Helo: "client.example.com",
+			Data: "Subject: test\r\n\r\nbody",
+		}
+
+		id, err := c.acceptMessage(msg)
+		So(err, ShouldBeNil)
+		So(id, ShouldNotBeEmpty)
+
+		stored, err := mem.Load(id)
+		So(err, ShouldBeNil)
+		So(stored, ShouldNotBeNil)
+		So(stored.Content.Headers[folderHeaderName], ShouldResemble, []string{"gateway2lease"})
+		So(stored.Content.Headers[tagHeaderName], ShouldResemble, []string{"jon:legacy"})
+	})
+
 	Convey("acceptMessage strips spoofed folder header when no authenticated username is present", t, func() {
 		mem := storage.CreateInMemory()
 		ch := make(chan *data.Message, 1)
@@ -254,6 +311,91 @@ func TestAcceptMessageFolderHeader(t *testing.T) {
 		So(stored, ShouldNotBeNil)
 
 		_, exists := stored.Content.Headers[folderHeaderName]
+		So(exists, ShouldBeFalse)
+	})
+
+	Convey("acceptMessage keeps tag headers from message content", t, func() {
+		mem := storage.CreateInMemory()
+		ch := make(chan *data.Message, 1)
+		c := &Session{
+			proto:       &mhsmtp.Protocol{Hostname: "localhost"},
+			storage:     mem,
+			messageChan: ch,
+		}
+		msg := &data.SMTPMessage{
+			From: "sender@example.com",
+			To:   []string{"rcpt@example.com"},
+			Helo: "client.example.com",
+			Data: "Subject: test\r\nX-MailHogPlus-Tags: finance:legacy\r\n\r\nbody",
+		}
+
+		id, err := c.acceptMessage(msg)
+		So(err, ShouldBeNil)
+		So(id, ShouldNotBeEmpty)
+
+		stored, err := mem.Load(id)
+		So(err, ShouldBeNil)
+		So(stored, ShouldNotBeNil)
+
+		So(stored.Content.Headers[tagHeaderName], ShouldResemble, []string{"finance:legacy"})
+		_, exists := stored.Content.Headers[legacyTagHeaderName]
+		So(exists, ShouldBeFalse)
+	})
+
+	Convey("acceptMessage canonicalizes legacy singular tag header name", t, func() {
+		mem := storage.CreateInMemory()
+		ch := make(chan *data.Message, 1)
+		c := &Session{
+			proto:       &mhsmtp.Protocol{Hostname: "localhost"},
+			storage:     mem,
+			messageChan: ch,
+		}
+		msg := &data.SMTPMessage{
+			From: "sender@example.com",
+			To:   []string{"rcpt@example.com"},
+			Helo: "client.example.com",
+			Data: "Subject: test\r\nX-MailHogPlus-Tag: ops\r\n\r\nbody",
+		}
+
+		id, err := c.acceptMessage(msg)
+		So(err, ShouldBeNil)
+		So(id, ShouldNotBeEmpty)
+
+		stored, err := mem.Load(id)
+		So(err, ShouldBeNil)
+		So(stored, ShouldNotBeNil)
+
+		So(stored.Content.Headers[tagHeaderName], ShouldResemble, []string{"ops"})
+		_, exists := stored.Content.Headers[legacyTagHeaderName]
+		So(exists, ShouldBeFalse)
+	})
+
+	Convey("acceptMessage appends authenticated username tags to header tags", t, func() {
+		mem := storage.CreateInMemory()
+		ch := make(chan *data.Message, 1)
+		c := &Session{
+			proto:                 &mhsmtp.Protocol{Hostname: "localhost"},
+			storage:               mem,
+			messageChan:           ch,
+			authenticatedUsername: "gateway2lease:jon:legacy",
+		}
+		msg := &data.SMTPMessage{
+			From: "sender@example.com",
+			To:   []string{"rcpt@example.com"},
+			Helo: "client.example.com",
+			Data: "Subject: test\r\nX-MailHogPlus-Tags: finance:legacy\r\n\r\nbody",
+		}
+
+		id, err := c.acceptMessage(msg)
+		So(err, ShouldBeNil)
+		So(id, ShouldNotBeEmpty)
+
+		stored, err := mem.Load(id)
+		So(err, ShouldBeNil)
+		So(stored, ShouldNotBeNil)
+		So(stored.Content.Headers[folderHeaderName], ShouldResemble, []string{"gateway2lease"})
+		So(stored.Content.Headers[tagHeaderName], ShouldResemble, []string{"finance:legacy:jon"})
+		_, exists := stored.Content.Headers[legacyTagHeaderName]
 		So(exists, ShouldBeFalse)
 	})
 }

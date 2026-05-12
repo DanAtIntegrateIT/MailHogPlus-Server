@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"io"
 	"log"
+	"net/url"
 	"strings"
 
 	"github.com/ian-kent/linkio"
@@ -31,11 +32,13 @@ type Session struct {
 	writer io.Writer
 	monkey monkey.ChaosMonkey
 
-	config *config.Config
+	config                *config.Config
 	authenticatedUsername string
 }
 
 const folderHeaderName = "X-MailHogPlus-Folder"
+const tagHeaderName = "X-MailHogPlus-Tags"
+const legacyTagHeaderName = "X-MailHogPlus-Tag"
 
 // Accept starts a new SMTP session using io.ReadWriteCloser
 func Accept(remoteAddress string, conn io.ReadWriteCloser, cfg *config.Config, storage storage.Storage, messageChan chan *data.Message, hostname string, monkey monkey.ChaosMonkey) {
@@ -97,7 +100,8 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 		}
 	}
 	username := extractAuthenticatedUsername(mechanism, args...)
-	if c.config != nil && !c.config.IsFolderAllowed(username) {
+	folder, _ := splitAuthenticatedUsername(username)
+	if c.config != nil && !c.config.IsFolderAllowed(folder) {
 		return smtp.ReplyInvalidAuth(), false
 	}
 	if len(username) > 0 {
@@ -138,7 +142,13 @@ func (c *Session) validateSender(from string) bool {
 
 func (c *Session) acceptMessage(msg *data.SMTPMessage) (id string, err error) {
 	m := msg.Parse(c.proto.Hostname)
-	setFolderHeader(m, c.authenticatedUsername)
+	folder, usernameTags := splitAuthenticatedUsername(c.authenticatedUsername)
+	headerTags := messageTagsFromHeaders(m)
+	combinedTags := make([]string, 0, len(headerTags)+len(usernameTags))
+	combinedTags = append(combinedTags, headerTags...)
+	combinedTags = append(combinedTags, usernameTags...)
+	setFolderHeader(m, folder)
+	setTagHeaders(m, sanitizeTags(combinedTags))
 	persistMessageContentToRaw(m)
 	c.logf("Storing message %s", m.ID)
 	id, err = c.storage.Store(m)
@@ -187,6 +197,95 @@ func decodeBase64OrRaw(value string) string {
 }
 
 func setFolderHeader(m *data.Message, folder string) {
+	setMessageHeaderValue(m, folderHeaderName, folder)
+}
+
+func setTagHeaders(m *data.Message, tags []string) {
+	if len(tags) == 0 {
+		setMessageHeaderValues(m, tagHeaderName, []string{})
+	} else {
+		setMessageHeaderValues(m, tagHeaderName, []string{strings.Join(tags, ":")})
+	}
+	removeMessageHeader(m, legacyTagHeaderName)
+}
+
+func messageTagsFromHeaders(m *data.Message) []string {
+	if m == nil || m.Content == nil || m.Content.Headers == nil {
+		return []string{}
+	}
+	rawTags := make([]string, 0)
+	rawTags = append(rawTags, tagsFromHeaderValues(m.Content.Headers, tagHeaderName)...)
+	rawTags = append(rawTags, tagsFromHeaderValues(m.Content.Headers, legacyTagHeaderName)...)
+	return sanitizeTags(rawTags)
+}
+
+func tagsFromHeaderValues(headers map[string][]string, headerName string) []string {
+	rawTags := make([]string, 0)
+	for k, values := range headers {
+		if !strings.EqualFold(k, headerName) {
+			continue
+		}
+		for _, value := range values {
+			for _, part := range splitTagValue(value) {
+				rawTags = append(rawTags, part)
+			}
+		}
+	}
+	return rawTags
+}
+
+func splitTagValue(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ':' || r == ','
+	})
+}
+
+func splitAuthenticatedUsername(username string) (folder string, tags []string) {
+	trimmed := strings.TrimSpace(username)
+	if len(trimmed) == 0 {
+		return "", []string{}
+	}
+	if decoded, err := url.PathUnescape(trimmed); err == nil {
+		trimmed = strings.TrimSpace(decoded)
+	}
+	parts := strings.Split(trimmed, ":")
+	folder = strings.TrimSpace(parts[0])
+	if len(parts) == 1 {
+		return folder, []string{}
+	}
+	return folder, sanitizeTags(parts[1:])
+}
+
+func sanitizeTags(rawTags []string) []string {
+	cleaned := make([]string, 0, len(rawTags))
+	seen := map[string]bool{}
+	for _, rawTag := range rawTags {
+		tag := strings.TrimSpace(rawTag)
+		if len(tag) == 0 {
+			continue
+		}
+		normalizedTag := strings.ToLower(tag)
+		if seen[normalizedTag] {
+			continue
+		}
+		seen[normalizedTag] = true
+		cleaned = append(cleaned, tag)
+	}
+	if len(cleaned) == 0 {
+		return []string{}
+	}
+	return cleaned
+}
+
+func setMessageHeaderValue(m *data.Message, headerName, value string) {
+	if len(value) == 0 {
+		setMessageHeaderValues(m, headerName, []string{})
+		return
+	}
+	setMessageHeaderValues(m, headerName, []string{value})
+}
+
+func setMessageHeaderValues(m *data.Message, headerName string, values []string) {
 	if m == nil || m.Content == nil {
 		return
 	}
@@ -194,12 +293,31 @@ func setFolderHeader(m *data.Message, folder string) {
 		m.Content.Headers = make(map[string][]string)
 	}
 	for k := range m.Content.Headers {
-		if strings.EqualFold(k, folderHeaderName) {
+		if strings.EqualFold(k, headerName) {
 			delete(m.Content.Headers, k)
 		}
 	}
-	if len(folder) > 0 {
-		m.Content.Headers[folderHeaderName] = []string{folder}
+
+	cleanedValues := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if len(trimmed) > 0 {
+			cleanedValues = append(cleanedValues, trimmed)
+		}
+	}
+	if len(cleanedValues) > 0 {
+		m.Content.Headers[headerName] = cleanedValues
+	}
+}
+
+func removeMessageHeader(m *data.Message, headerName string) {
+	if m == nil || m.Content == nil || m.Content.Headers == nil {
+		return
+	}
+	for k := range m.Content.Headers {
+		if strings.EqualFold(k, headerName) {
+			delete(m.Content.Headers, k)
+		}
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/smtp"
 	"strconv"
 	"strings"
 	"time"
@@ -335,23 +334,8 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 	}
 	bytes = append(bytes, []byte("\r\n"+msg.Content.Body)...)
 
-	var auth smtp.Auth
-
-	if len(cfg.Username) > 0 || len(cfg.Password) > 0 {
-		log.Printf("Found username/password, using auth mechanism: [%s]", cfg.Mechanism)
-		switch cfg.Mechanism {
-		case "CRAMMD5":
-			auth = smtp.CRAMMD5Auth(cfg.Username, cfg.Password)
-		case "PLAIN":
-			auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		default:
-			log.Printf("Error - invalid authentication mechanism")
-			w.WriteHeader(400)
-			return
-		}
-	}
-
-	err = smtp.SendMail(cfg.Host+":"+cfg.Port, auth, "nobody@"+apiv1.config.Hostname, []string{cfg.Email}, bytes)
+	releaseSMTPConfig := config.OutgoingSMTP(cfg)
+	err = sendOutgoingSMTPMessage(releaseSMTPConfig, "nobody@"+apiv1.config.Hostname, []string{cfg.Email}, bytes)
 	if err != nil {
 		log.Printf("Failed to release message: %s", err)
 		w.WriteHeader(500)

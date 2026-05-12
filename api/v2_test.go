@@ -3,6 +3,7 @@ package api
 import (
 	"testing"
 
+	"github.com/mailhog/MailHog-Server/config"
 	"github.com/mailhog/data"
 )
 
@@ -42,6 +43,122 @@ func TestFilterMessagesByFolder(t *testing.T) {
 	gatewayUpper := filterMessagesByFolder(messages, "GATEWAY")
 	if len(gatewayUpper) != 2 {
 		t.Fatalf("expected 2 gateway messages for uppercase filter, got %d", len(gatewayUpper))
+	}
+}
+
+func TestTagFromMessage(t *testing.T) {
+	msg := newTestMessageWithTag("1", "gateway", "jon")
+	got := tagFromMessage(msg)
+	if got != "jon" {
+		t.Fatalf("expected tag jon, got %q", got)
+	}
+}
+
+func TestTagFromMessageMultiTagUsernameFormat(t *testing.T) {
+	msg := newTestMessageWithTags("1", "gateway", []string{"jon:legacy:ops"})
+	got := tagFromMessage(msg)
+	if got != "jon:legacy:ops" {
+		t.Fatalf("expected tags jon:legacy:ops, got %q", got)
+	}
+}
+
+func TestFilterMessagesByTag(t *testing.T) {
+	messages := []data.Message{
+		newTestMessageWithTag("1", "", ""),
+		newTestMessageWithTag("2", "gateway", "jon"),
+		newTestMessageWithTag("3", "gateway", "sara"),
+		newTestMessageWithTag("4", "thorlux", "jon"),
+		newTestMessageWithTag("5", "gateway", "jon:legacy"),
+	}
+
+	jon := filterMessagesByTag(messages, "jon")
+	if len(jon) != 3 {
+		t.Fatalf("expected 3 jon-tagged messages, got %d", len(jon))
+	}
+
+	jonUpper := filterMessagesByTag(messages, "JON")
+	if len(jonUpper) != 3 {
+		t.Fatalf("expected 3 jon-tagged messages for uppercase filter, got %d", len(jonUpper))
+	}
+
+	legacy := filterMessagesByTag(messages, "legacy")
+	if len(legacy) != 1 {
+		t.Fatalf("expected 1 legacy-tagged message, got %d", len(legacy))
+	}
+
+	untagged := filterMessagesByTag(messages, "")
+	if len(untagged) != 1 {
+		t.Fatalf("expected 1 untagged message, got %d", len(untagged))
+	}
+}
+
+func TestFilterMessagesByLegacyTagHeader(t *testing.T) {
+	message := data.Message{
+		ID: data.MessageID("1"),
+		Content: &data.Content{
+			Headers: map[string][]string{
+				legacyTagHeaderName: []string{"legacy:finance"},
+			},
+		},
+	}
+
+	legacy := filterMessagesByTag([]data.Message{message}, "legacy")
+	if len(legacy) != 1 {
+		t.Fatalf("expected 1 legacy-tagged message from legacy header, got %d", len(legacy))
+	}
+
+	finance := filterMessagesByTag([]data.Message{message}, "finance")
+	if len(finance) != 1 {
+		t.Fatalf("expected 1 finance-tagged message from legacy header, got %d", len(finance))
+	}
+}
+
+func TestFilterMessagesByTagFallbackFromBodyUsername(t *testing.T) {
+	messages := []data.Message{
+		newTestMessageWithBody("1", "", "SMTP Username: amazon:finance\r\n"),
+		newTestMessageWithBody("2", "", "<p><strong>SMTP Username:</strong> amazon:legacy</p>"),
+		newTestMessageWithBody("3", "", "SMTP Username: amazon\r\n"),
+		newTestMessageWithBody("4", "", "No username line here"),
+	}
+
+	finance := filterMessagesByTag(messages, "finance")
+	if len(finance) != 1 {
+		t.Fatalf("expected 1 finance-tagged message, got %d", len(finance))
+	}
+	if string(finance[0].ID) != "1" {
+		t.Fatalf("expected finance message id 1, got %s", finance[0].ID)
+	}
+
+	legacy := filterMessagesByTag(messages, "legacy")
+	if len(legacy) != 1 {
+		t.Fatalf("expected 1 legacy-tagged message, got %d", len(legacy))
+	}
+	if string(legacy[0].ID) != "2" {
+		t.Fatalf("expected legacy message id 2, got %s", legacy[0].ID)
+	}
+
+	untagged := filterMessagesByTag(messages, "")
+	if len(untagged) != 2 {
+		t.Fatalf("expected 2 untagged messages, got %d", len(untagged))
+	}
+}
+
+func TestFilterMessagesByFolderAndTag(t *testing.T) {
+	messages := []data.Message{
+		newTestMessageWithTag("1", "gateway", "jon"),
+		newTestMessageWithTag("2", "gateway", "sara"),
+		newTestMessageWithTag("3", "thorlux", "jon"),
+		newTestMessageWithTag("4", "", "jon"),
+	}
+
+	filtered := filterMessagesByFolder(messages, "gateway")
+	filtered = filterMessagesByTag(filtered, "jon")
+
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 gateway+jon message, got %d", len(filtered))
+	}
+	if string(filtered[0].ID) != "1" {
+		t.Fatalf("expected message id 1, got %s", filtered[0].ID)
 	}
 }
 
@@ -155,6 +272,88 @@ func TestSanitizeFolderNames(t *testing.T) {
 	}
 }
 
+func TestNormalizeOutgoingSMTPTestConfig(t *testing.T) {
+	valid, err := normalizeOutgoingSMTPTestConfig(config.OutgoingSMTP{
+		Host:      "smtp.example.com",
+		Port:      "587",
+		Mechanism: "plain",
+		Username:  "mailer",
+		Password:  "secret",
+	})
+	if err != nil {
+		t.Fatalf("expected config to validate, got error: %v", err)
+	}
+	if valid.Mechanism != "PLAIN" {
+		t.Fatalf("expected PLAIN mechanism, got %q", valid.Mechanism)
+	}
+	if valid.Username != "mailer" {
+		t.Fatalf("expected username mailer, got %q", valid.Username)
+	}
+
+	noAuth, err := normalizeOutgoingSMTPTestConfig(config.OutgoingSMTP{
+		Host:      "smtp.example.com",
+		Port:      "25",
+		Mechanism: "none",
+		Username:  "ignored",
+		Password:  "ignored",
+	})
+	if err != nil {
+		t.Fatalf("expected NONE mechanism config to validate, got error: %v", err)
+	}
+	if noAuth.Mechanism != "NONE" {
+		t.Fatalf("expected NONE mechanism, got %q", noAuth.Mechanism)
+	}
+	if noAuth.Username != "" || noAuth.Password != "" {
+		t.Fatalf("expected auth fields to be cleared for NONE mechanism")
+	}
+}
+
+func TestNormalizeOutgoingSMTPTestConfigValidationErrors(t *testing.T) {
+	_, err := normalizeOutgoingSMTPTestConfig(config.OutgoingSMTP{
+		Port: "25",
+	})
+	if err == nil || err.Error() != "smtp host is required" {
+		t.Fatalf("expected missing host error, got %v", err)
+	}
+
+	_, err = normalizeOutgoingSMTPTestConfig(config.OutgoingSMTP{
+		Host: "smtp.example.com",
+	})
+	if err == nil || err.Error() != "smtp port is required" {
+		t.Fatalf("expected missing port error, got %v", err)
+	}
+
+	_, err = normalizeOutgoingSMTPTestConfig(config.OutgoingSMTP{
+		Host:      "smtp.example.com",
+		Port:      "587",
+		Mechanism: "plain",
+	})
+	if err == nil || err.Error() != "smtp username is required for PLAIN authentication" {
+		t.Fatalf("expected missing username error, got %v", err)
+	}
+
+	_, err = normalizeOutgoingSMTPTestConfig(config.OutgoingSMTP{
+		Host:      "smtp.example.com",
+		Port:      "587",
+		Mechanism: "xoauth2",
+	})
+	if err == nil || err.Error() != "unsupported smtp authentication mechanism: XOAUTH2" {
+		t.Fatalf("expected unsupported mechanism error, got %v", err)
+	}
+}
+
+func TestIsImplicitTLSSMTPPort(t *testing.T) {
+	if !isImplicitTLSSMTPPort("465") {
+		t.Fatalf("expected port 465 to use implicit TLS")
+	}
+	if !isImplicitTLSSMTPPort(" 465 ") {
+		t.Fatalf("expected trimmed port 465 to use implicit TLS")
+	}
+	if isImplicitTLSSMTPPort("587") {
+		t.Fatalf("expected port 587 to avoid implicit TLS")
+	}
+}
+
 func TestEmailQualityInputFromMessage(t *testing.T) {
 	message := &data.Message{
 		Content: &data.Content{
@@ -211,9 +410,23 @@ func TestPageMessages(t *testing.T) {
 }
 
 func newTestMessage(id, folder string) data.Message {
+	return newTestMessageWithTag(id, folder, "")
+}
+
+func newTestMessageWithTag(id, folder, tag string) data.Message {
+	if tag == "" {
+		return newTestMessageWithTags(id, folder, []string{})
+	}
+	return newTestMessageWithTags(id, folder, []string{tag})
+}
+
+func newTestMessageWithTags(id, folder string, tags []string) data.Message {
 	headers := map[string][]string{}
 	if folder != "" {
 		headers[folderHeaderName] = []string{folder}
+	}
+	if len(tags) > 0 {
+		headers[tagHeaderName] = tags
 	}
 	return data.Message{
 		ID: data.MessageID(id),
@@ -221,4 +434,13 @@ func newTestMessage(id, folder string) data.Message {
 			Headers: headers,
 		},
 	}
+}
+
+func newTestMessageWithBody(id, folder, body string) data.Message {
+	msg := newTestMessageWithTags(id, folder, []string{})
+	if msg.Content == nil {
+		msg.Content = &data.Content{Headers: map[string][]string{}}
+	}
+	msg.Content.Body = body
+	return msg
 }

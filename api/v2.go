@@ -1,14 +1,20 @@
 package api
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"mime/quotedprintable"
+	"net"
 	"net/http"
+	"net/smtp"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/pat"
 	"github.com/ian-kent/go-log/log"
@@ -56,7 +62,9 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/jim").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("GET").HandlerFunc(apiv2.listOutgoingSMTP)
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp/test").Methods("POST").HandlerFunc(apiv2.testOutgoingSMTP)
 	r.Path(conf.WebPath + "/api/v2/outgoing-smtp").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+	r.Path(conf.WebPath + "/api/v2/outgoing-smtp/test").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("GET").HandlerFunc(apiv2.getSettings)
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("PUT").HandlerFunc(apiv2.updateSettings)
@@ -121,7 +129,20 @@ type updateSettingsRequest struct {
 	OutgoingSMTP          []config.OutgoingSMTP `json:"outgoingSMTP"`
 }
 
+type outgoingSMTPTestResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+const outgoingSMTPTestTimeout = 15 * time.Second
+
 const folderHeaderName = "X-MailHogPlus-Folder"
+const tagHeaderName = "X-MailHogPlus-Tags"
+const legacyTagHeaderName = "X-MailHogPlus-Tag"
+
+var smtpUsernameTagFallbackRE = regexp.MustCompile(`(?i)smtp\s+username:\s*([^\s<\r\n]+)`)
+var htmlTagStripRE = regexp.MustCompile(`(?is)<[^>]+>`)
 
 func (apiv2 *APIv2) getStartLimit(w http.ResponseWriter, req *http.Request) (start, limit int) {
 	start = 0
@@ -150,6 +171,8 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 
 	start, limit := apiv2.getStartLimit(w, req)
 	folder := strings.TrimSpace(req.URL.Query().Get("folder"))
+	tag := strings.TrimSpace(req.URL.Query().Get("tag"))
+	_, hasTagFilter := req.URL.Query()["tag"]
 	order := normalizeMessageOrder(req.URL.Query().Get("order"))
 	apiv2.applyRetention()
 
@@ -161,6 +184,9 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 	}
 
 	filtered := filterMessagesByFolder(messages, folder)
+	if hasTagFilter {
+		filtered = filterMessagesByTag(filtered, tag)
+	}
 	sortMessagesByCreated(filtered, order)
 	paged := pageMessages(filtered, start, limit)
 
@@ -200,7 +226,8 @@ func (apiv2 *APIv2) deleteMessages(w http.ResponseWriter, req *http.Request) {
 	w.Header().Add("Content-Type", "application/json")
 
 	_, hasFolderFilter := req.URL.Query()["folder"]
-	if !hasFolderFilter {
+	_, hasTagFilter := req.URL.Query()["tag"]
+	if !hasFolderFilter && !hasTagFilter {
 		if err := apiv2.config.Storage.DeleteAll(); err != nil {
 			log.Printf("[APIv2] Error deleting all messages: %s", err)
 			w.WriteHeader(500)
@@ -212,12 +239,16 @@ func (apiv2 *APIv2) deleteMessages(w http.ResponseWriter, req *http.Request) {
 	}
 
 	folder := strings.TrimSpace(req.URL.Query().Get("folder"))
+	tag := strings.TrimSpace(req.URL.Query().Get("tag"))
 	messages, err := apiv2.listAllMessages()
 	if err != nil {
 		panic(err)
 	}
 
 	targets := filterMessagesByFolder(messages, folder)
+	if hasTagFilter {
+		targets = filterMessagesByTag(targets, tag)
+	}
 	deleted := 0
 	for _, m := range targets {
 		if err := apiv2.config.Storage.DeleteOne(string(m.ID)); err != nil {
@@ -254,6 +285,8 @@ func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	folder := strings.TrimSpace(req.URL.Query().Get("folder"))
+	tag := strings.TrimSpace(req.URL.Query().Get("tag"))
+	_, hasTagFilter := req.URL.Query()["tag"]
 	apiv2.applyRetention()
 
 	var res messagesResult
@@ -276,6 +309,9 @@ func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
 	}
 
 	filtered := filterMessagesByFolder([]data.Message(*messages), folder)
+	if hasTagFilter {
+		filtered = filterMessagesByTag(filtered, tag)
+	}
 	sortMessagesByCreated(filtered, order)
 	paged := pageMessages(filtered, start, limit)
 
@@ -400,6 +436,214 @@ func (apiv2 *APIv2) listOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
 
 	b, _ := json.Marshal(config.SanitizeOutgoingSMTPMap(apiv2.config.OutgoingSMTP))
 	w.Header().Add("Content-Type", "application/json")
+	w.Write(b)
+}
+
+func (apiv2 *APIv2) testOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
+	log.Println("[APIv2] POST /api/v2/outgoing-smtp/test")
+	apiv2.defaultOptions(w, req)
+	w.Header().Add("Content-Type", "application/json")
+
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		writeOutgoingSMTPTestResponse(w, 400, false, "", "unable to read request body")
+		return
+	}
+
+	var in config.OutgoingSMTP
+	if err := json.Unmarshal(body, &in); err != nil {
+		writeOutgoingSMTPTestResponse(w, 400, false, "", "invalid request body")
+		return
+	}
+
+	cfg, validationErr := normalizeOutgoingSMTPTestConfig(in)
+	if validationErr != nil {
+		writeOutgoingSMTPTestResponse(w, 400, false, "", validationErr.Error())
+		return
+	}
+
+	if err := runOutgoingSMTPConnectivityTest(cfg); err != nil {
+		writeOutgoingSMTPTestResponse(w, 400, false, "", err.Error())
+		return
+	}
+
+	writeOutgoingSMTPTestResponse(w, 200, true, "SMTP server test succeeded.", "")
+}
+
+func normalizeOutgoingSMTPTestConfig(in config.OutgoingSMTP) (config.OutgoingSMTP, error) {
+	out := config.OutgoingSMTP{
+		Name:      strings.TrimSpace(in.Name),
+		Host:      strings.TrimSpace(in.Host),
+		Port:      strings.TrimSpace(in.Port),
+		Username:  strings.TrimSpace(in.Username),
+		Password:  in.Password,
+		Mechanism: strings.ToUpper(strings.TrimSpace(in.Mechanism)),
+	}
+
+	if out.Host == "" {
+		return out, fmt.Errorf("smtp host is required")
+	}
+	if out.Port == "" {
+		return out, fmt.Errorf("smtp port is required")
+	}
+
+	switch out.Mechanism {
+	case "", "NONE":
+		out.Mechanism = "NONE"
+		out.Username = ""
+		out.Password = ""
+	case "PLAIN", "CRAMMD5":
+		if out.Username == "" {
+			return out, fmt.Errorf("smtp username is required for %s authentication", out.Mechanism)
+		}
+	default:
+		return out, fmt.Errorf("unsupported smtp authentication mechanism: %s", out.Mechanism)
+	}
+
+	return out, nil
+}
+
+func runOutgoingSMTPConnectivityTest(cfg config.OutgoingSMTP) error {
+	client, err := newOutgoingSMTPClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if err := authenticateOutgoingSMTPClient(client, cfg); err != nil {
+		return err
+	}
+
+	if err := client.Noop(); err != nil {
+		return fmt.Errorf("smtp noop failed: %s", err)
+	}
+
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("smtp quit failed: %s", err)
+	}
+
+	return nil
+}
+
+func sendOutgoingSMTPMessage(cfg config.OutgoingSMTP, from string, recipients []string, message []byte) error {
+	client, err := newOutgoingSMTPClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if err := authenticateOutgoingSMTPClient(client, cfg); err != nil {
+		return err
+	}
+
+	if err := client.Mail(from); err != nil {
+		return fmt.Errorf("smtp mail from failed: %s", err)
+	}
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient); err != nil {
+			return fmt.Errorf("smtp recipient failed for %s: %s", recipient, err)
+		}
+	}
+
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data failed: %s", err)
+	}
+	if _, err := writer.Write(message); err != nil {
+		writer.Close()
+		return fmt.Errorf("smtp message write failed: %s", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("smtp message close failed: %s", err)
+	}
+
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("smtp quit failed: %s", err)
+	}
+	return nil
+}
+
+func newOutgoingSMTPClient(cfg config.OutgoingSMTP) (*smtp.Client, error) {
+	addr := net.JoinHostPort(cfg.Host, cfg.Port)
+	dialer := net.Dialer{Timeout: outgoingSMTPTestTimeout}
+	conn, err := dialer.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("connection failed: %s", err)
+	}
+
+	if err := conn.SetDeadline(time.Now().Add(outgoingSMTPTestTimeout)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("connection deadline failed: %s", err)
+	}
+
+	if isImplicitTLSSMTPPort(cfg.Port) {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: cfg.Host})
+		if err := tlsConn.Handshake(); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("tls handshake failed: %s", err)
+		}
+		conn = tlsConn
+	}
+
+	client, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("smtp handshake failed: %s", err)
+	}
+
+	if err := client.Hello("mailhogplus-test"); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("smtp hello failed: %s", err)
+	}
+
+	if !isImplicitTLSSMTPPort(cfg.Port) {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			if err := client.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
+				client.Close()
+				return nil, fmt.Errorf("starttls failed: %s", err)
+			}
+		}
+	}
+
+	return client, nil
+}
+
+func authenticateOutgoingSMTPClient(client *smtp.Client, cfg config.OutgoingSMTP) error {
+	if cfg.Mechanism != "NONE" {
+		hasAuth, _ := client.Extension("AUTH")
+		if !hasAuth {
+			return fmt.Errorf("smtp server does not support authentication")
+		}
+
+		var auth smtp.Auth
+		switch cfg.Mechanism {
+		case "PLAIN":
+			auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		case "CRAMMD5":
+			auth = smtp.CRAMMD5Auth(cfg.Username, cfg.Password)
+		default:
+			return fmt.Errorf("unsupported smtp authentication mechanism: %s", cfg.Mechanism)
+		}
+
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("authentication failed: %s", err)
+		}
+	}
+	return nil
+}
+
+func isImplicitTLSSMTPPort(port string) bool {
+	return strings.TrimSpace(port) == "465"
+}
+
+func writeOutgoingSMTPTestResponse(w http.ResponseWriter, status int, success bool, message, responseError string) {
+	w.WriteHeader(status)
+	res := outgoingSMTPTestResponse{
+		Success: success,
+		Message: message,
+		Error:   responseError,
+	}
+	b, _ := json.Marshal(res)
 	w.Write(b)
 }
 
@@ -700,6 +944,124 @@ func folderFromMessage(message data.Message) string {
 
 func normalizeFolder(folder string) string {
 	return strings.ToLower(strings.TrimSpace(folder))
+}
+
+func filterMessagesByTag(messages []data.Message, tag string) []data.Message {
+	normalizedTag := normalizeTag(tag)
+	filtered := make([]data.Message, 0, len(messages))
+	for _, m := range messages {
+		if normalizedTag == "" {
+			if len(messageTagsFromMessage(m)) == 0 {
+				filtered = append(filtered, m)
+			}
+			continue
+		}
+		for _, messageTag := range messageTagsFromMessage(m) {
+			if normalizeTag(messageTag) == normalizedTag {
+				filtered = append(filtered, m)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func tagFromMessage(message data.Message) string {
+	return strings.Join(messageTagsFromMessage(message), ":")
+}
+
+func messageTagsFromMessage(message data.Message) []string {
+	if message.Content == nil || message.Content.Headers == nil {
+		return tagsFromMessageBodyFallback(message)
+	}
+	rawTags := make([]string, 0)
+	rawTags = append(rawTags, tagsFromHeaderValues(message.Content.Headers, tagHeaderName)...)
+	rawTags = append(rawTags, tagsFromHeaderValues(message.Content.Headers, legacyTagHeaderName)...)
+	tags := sanitizeTagNames(rawTags)
+	if len(tags) > 0 {
+		return tags
+	}
+	return tagsFromMessageBodyFallback(message)
+}
+
+func tagsFromHeaderValues(headers map[string][]string, headerName string) []string {
+	rawTags := make([]string, 0)
+	for key, values := range headers {
+		if !strings.EqualFold(key, headerName) {
+			continue
+		}
+		for _, value := range values {
+			rawTags = append(rawTags, splitTagHeaderValue(value)...)
+		}
+	}
+	return rawTags
+}
+
+func splitTagHeaderValue(value string) []string {
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ':' || r == ','
+	})
+}
+
+func normalizeTag(tag string) string {
+	return strings.ToLower(strings.TrimSpace(tag))
+}
+
+func tagsFromMessageBodyFallback(message data.Message) []string {
+	candidates := make([]string, 0, 3)
+	if message.Content != nil && len(strings.TrimSpace(message.Content.Body)) > 0 {
+		candidates = append(candidates, message.Content.Body)
+	}
+	if plain := findMessageContentByMIME(&message, "text/plain"); plain != nil {
+		if decoded := strings.TrimSpace(decodedContentBody(plain)); len(decoded) > 0 {
+			candidates = append(candidates, decoded)
+		}
+	}
+	if html := findMessageContentByMIME(&message, "text/html"); html != nil {
+		if decoded := strings.TrimSpace(decodedContentBody(html)); len(decoded) > 0 {
+			candidates = append(candidates, decoded)
+		}
+	}
+
+	for _, candidate := range candidates {
+		cleaned := strings.TrimSpace(htmlTagStripRE.ReplaceAllString(candidate, " "))
+		if len(cleaned) == 0 {
+			continue
+		}
+		match := smtpUsernameTagFallbackRE.FindStringSubmatch(cleaned)
+		if len(match) < 2 {
+			continue
+		}
+		username := strings.TrimSpace(match[1])
+		parts := strings.Split(username, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		tags := sanitizeTagNames(parts[1:])
+		if len(tags) > 0 {
+			return tags
+		}
+	}
+
+	return []string{}
+}
+
+func sanitizeTagNames(tags []string) []string {
+	cleaned := make([]string, 0, len(tags))
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		name := strings.TrimSpace(tag)
+		normalized := normalizeTag(name)
+		if len(normalized) == 0 || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		cleaned = append(cleaned, name)
+	}
+	if len(cleaned) == 0 {
+		return []string{}
+	}
+	return cleaned
 }
 
 func sanitizeFolderNames(folders []string) []string {
