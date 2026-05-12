@@ -148,6 +148,7 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 
 	start, limit := apiv2.getStartLimit(w, req)
 	folder := strings.TrimSpace(req.URL.Query().Get("folder"))
+	order := normalizeMessageOrder(req.URL.Query().Get("order"))
 	apiv2.applyRetention()
 
 	var res messagesResult
@@ -158,6 +159,7 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 	}
 
 	filtered := filterMessagesByFolder(messages, folder)
+	sortMessagesByCreated(filtered, order)
 	paged := pageMessages(filtered, start, limit)
 
 	res.Count = len(paged)
@@ -236,6 +238,7 @@ func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
 	apiv2.defaultOptions(w, req)
 
 	start, limit := apiv2.getStartLimit(w, req)
+	order := normalizeMessageOrder(req.URL.Query().Get("order"))
 
 	kind := req.URL.Query().Get("kind")
 	if kind != "from" && kind != "to" && kind != "containing" {
@@ -271,6 +274,7 @@ func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
 	}
 
 	filtered := filterMessagesByFolder([]data.Message(*messages), folder)
+	sortMessagesByCreated(filtered, order)
 	paged := pageMessages(filtered, start, limit)
 
 	res.Count = len(paged)
@@ -721,4 +725,34 @@ func pageMessages(messages []data.Message, start, limit int) []data.Message {
 		end = len(messages)
 	}
 	return messages[start:end]
+}
+
+func normalizeMessageOrder(order string) string {
+	switch strings.ToLower(strings.TrimSpace(order)) {
+	case "asc":
+		return "asc"
+	default:
+		return "desc"
+	}
+}
+
+func sortMessagesByCreated(messages []data.Message, order string) {
+	if len(messages) < 2 {
+		return
+	}
+	order = normalizeMessageOrder(order)
+	sort.SliceStable(messages, func(i, j int) bool {
+		ci := messages[i].Created
+		cj := messages[j].Created
+		if ci.Equal(cj) {
+			if order == "asc" {
+				return string(messages[i].ID) < string(messages[j].ID)
+			}
+			return string(messages[i].ID) > string(messages[j].ID)
+		}
+		if order == "asc" {
+			return ci.Before(cj)
+		}
+		return ci.After(cj)
+	})
 }
