@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"encoding/base64"
 	"errors"
 	"sync"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 
 	"github.com/mailhog/data"
+	mhsmtp "github.com/mailhog/smtp"
 	"github.com/mailhog/storage"
 )
 
@@ -58,7 +60,7 @@ func TestSocketError(t *testing.T) {
 
 func TestAcceptMessage(t *testing.T) {
 	Convey("acceptMessage should be called", t, func() {
-		mbuf := "EHLO localhost\nMAIL FROM:<test>\nRCPT TO:<test>\nDATA\nHi.\r\n.\r\nQUIT\n"
+		mbuf := "EHLO localhost\r\nMAIL FROM:<test>\r\nRCPT TO:<test>\r\nDATA\r\nHi.\r\n.\r\nQUIT\r\n"
 		var rbuf []byte
 		frw := &fakeRw{
 			_read: func(p []byte) (n int, err error) {
@@ -120,6 +122,25 @@ func TestValidateAuthentication(t *testing.T) {
 		So(err, ShouldBeNil)
 		So(ok, ShouldBeTrue)
 	})
+
+	Convey("validateAuthentication stores authenticated username when present", t, func() {
+		c := &Session{}
+
+		err, ok := c.validateAuthentication("PLAIN", "gateway", "secret")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(c.authenticatedUsername, ShouldEqual, "gateway")
+	})
+
+	Convey("validateAuthentication decodes LOGIN username", t, func() {
+		c := &Session{}
+		encoded := base64.StdEncoding.EncodeToString([]byte("thorlux"))
+
+		err, ok := c.validateAuthentication("LOGIN", encoded, "ignored")
+		So(err, ShouldBeNil)
+		So(ok, ShouldBeTrue)
+		So(c.authenticatedUsername, ShouldEqual, "thorlux")
+	})
 }
 
 func TestValidateRecipient(t *testing.T) {
@@ -137,5 +158,60 @@ func TestValidateSender(t *testing.T) {
 
 		So(c.validateSender("OINK"), ShouldBeTrue)
 		So(c.validateSender("foo@bar.mailhog"), ShouldBeTrue)
+	})
+}
+
+func TestAcceptMessageFolderHeader(t *testing.T) {
+	Convey("acceptMessage stores folder header when authenticated username is present", t, func() {
+		mem := storage.CreateInMemory()
+		ch := make(chan *data.Message, 1)
+		c := &Session{
+			proto:                 &mhsmtp.Protocol{Hostname: "localhost"},
+			storage:               mem,
+			messageChan:           ch,
+			authenticatedUsername: "malachi",
+		}
+		msg := &data.SMTPMessage{
+			From: "sender@example.com",
+			To:   []string{"rcpt@example.com"},
+			Helo: "client.example.com",
+			Data: "Subject: test\r\n\r\nbody",
+		}
+
+		id, err := c.acceptMessage(msg)
+		So(err, ShouldBeNil)
+		So(id, ShouldNotBeEmpty)
+
+		stored, err := mem.Load(id)
+		So(err, ShouldBeNil)
+		So(stored, ShouldNotBeNil)
+		So(stored.Content.Headers[folderHeaderName], ShouldResemble, []string{"malachi"})
+	})
+
+	Convey("acceptMessage strips spoofed folder header when no authenticated username is present", t, func() {
+		mem := storage.CreateInMemory()
+		ch := make(chan *data.Message, 1)
+		c := &Session{
+			proto:       &mhsmtp.Protocol{Hostname: "localhost"},
+			storage:     mem,
+			messageChan: ch,
+		}
+		msg := &data.SMTPMessage{
+			From: "sender@example.com",
+			To:   []string{"rcpt@example.com"},
+			Helo: "client.example.com",
+			Data: "Subject: test\r\nX-MailHogPlus-Folder: spoofed\r\n\r\nbody",
+		}
+
+		id, err := c.acceptMessage(msg)
+		So(err, ShouldBeNil)
+		So(id, ShouldNotBeEmpty)
+
+		stored, err := mem.Load(id)
+		So(err, ShouldBeNil)
+		So(stored, ShouldNotBeNil)
+
+		_, exists := stored.Content.Headers[folderHeaderName]
+		So(exists, ShouldBeFalse)
 	})
 }

@@ -3,6 +3,7 @@ package smtp
 // http://www.rfc-editor.org/rfc/rfc5321.txt
 
 import (
+	"encoding/base64"
 	"io"
 	"log"
 	"strings"
@@ -28,7 +29,11 @@ type Session struct {
 	reader io.Reader
 	writer io.Writer
 	monkey monkey.ChaosMonkey
+
+	authenticatedUsername string
 }
+
+const folderHeaderName = "X-MailHogPlus-Folder"
 
 // Accept starts a new SMTP session using io.ReadWriteCloser
 func Accept(remoteAddress string, conn io.ReadWriteCloser, storage storage.Storage, messageChan chan *data.Message, hostname string, monkey monkey.ChaosMonkey) {
@@ -48,7 +53,19 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, storage storage.Stora
 		}
 	}
 
-	session := &Session{conn, proto, storage, messageChan, remoteAddress, false, "", link, reader, writer, monkey}
+	session := &Session{
+		conn:          conn,
+		proto:         proto,
+		storage:       storage,
+		messageChan:   messageChan,
+		remoteAddress: remoteAddress,
+		isTLS:         false,
+		line:          "",
+		link:          link,
+		reader:        reader,
+		writer:        writer,
+		monkey:        monkey,
+	}
 	proto.LogHandler = session.logf
 	proto.MessageReceivedHandler = session.acceptMessage
 	proto.ValidateSenderHandler = session.validateSender
@@ -59,7 +76,7 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, storage storage.Stora
 	session.logf("Starting session")
 	session.Write(proto.Start())
 	for session.Read() == true {
-		if monkey != nil && monkey.Disconnect != nil && monkey.Disconnect() {
+		if monkey != nil && monkey.Disconnect() {
 			session.conn.Close()
 			break
 		}
@@ -74,6 +91,9 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 			// FIXME better error?
 			return smtp.ReplyUnrecognisedCommand(), false
 		}
+	}
+	if username := extractAuthenticatedUsername(mechanism, args...); len(username) > 0 {
+		c.authenticatedUsername = username
 	}
 	return nil, true
 }
@@ -100,10 +120,57 @@ func (c *Session) validateSender(from string) bool {
 
 func (c *Session) acceptMessage(msg *data.SMTPMessage) (id string, err error) {
 	m := msg.Parse(c.proto.Hostname)
+	setFolderHeader(m, c.authenticatedUsername)
 	c.logf("Storing message %s", m.ID)
 	id, err = c.storage.Store(m)
 	c.messageChan <- m
 	return
+}
+
+func extractAuthenticatedUsername(mechanism string, args ...string) string {
+	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
+	case "PLAIN":
+		if len(args) > 0 {
+			return strings.TrimSpace(args[0])
+		}
+	case "LOGIN":
+		if len(args) > 0 {
+			return decodeBase64OrRaw(args[0])
+		}
+	case "EXTERNAL":
+		if len(args) > 0 {
+			return decodeBase64OrRaw(args[0])
+		}
+	}
+	return ""
+}
+
+func decodeBase64OrRaw(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) == 0 {
+		return ""
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+		return strings.TrimSpace(string(decoded))
+	}
+	return value
+}
+
+func setFolderHeader(m *data.Message, folder string) {
+	if m == nil || m.Content == nil {
+		return
+	}
+	if m.Content.Headers == nil {
+		m.Content.Headers = make(map[string][]string)
+	}
+	for k := range m.Content.Headers {
+		if strings.EqualFold(k, folderHeaderName) {
+			delete(m.Content.Headers, k)
+		}
+	}
+	if len(folder) > 0 {
+		m.Content.Headers[folderHeaderName] = []string{folder}
+	}
 }
 
 func (c *Session) logf(message string, args ...interface{}) {
