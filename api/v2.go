@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io/ioutil"
+	"mime/quotedprintable"
 	"net/http"
 	"sort"
 	"strconv"
@@ -11,6 +13,7 @@ import (
 	"github.com/gorilla/pat"
 	"github.com/ian-kent/go-log/log"
 	"github.com/mailhog/MailHog-Server/config"
+	"github.com/mailhog/MailHog-Server/emailquality"
 	"github.com/mailhog/MailHog-Server/monkey"
 	"github.com/mailhog/MailHog-Server/websockets"
 	"github.com/mailhog/data"
@@ -37,6 +40,8 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("GET").HandlerFunc(apiv2.messages)
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("DELETE").HandlerFunc(apiv2.deleteMessages)
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/quality").Methods("GET").HandlerFunc(apiv2.messageQuality)
+	r.Path(conf.WebPath + "/api/v2/messages/{id}/quality").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/folders").Methods("GET").HandlerFunc(apiv2.folders)
 	r.Path(conf.WebPath + "/api/v2/folders").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
@@ -161,6 +166,25 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 	bytes, _ := json.Marshal(res)
 	w.Header().Add("Content-Type", "text/json")
 	w.Write(bytes)
+}
+
+func (apiv2 *APIv2) messageQuality(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get(":id")
+	log.Printf("[APIv2] GET /api/v2/messages/%s/quality\n", id)
+
+	apiv2.defaultOptions(w, req)
+	w.Header().Add("Content-Type", "application/json")
+
+	message, err := apiv2.config.Storage.Load(id)
+	if err != nil || message == nil {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"error":"message not found"}`))
+		return
+	}
+
+	res := emailquality.Score(emailQualityInputFromMessage(message))
+	b, _ := json.Marshal(res)
+	w.Write(b)
 }
 
 func (apiv2 *APIv2) deleteMessages(w http.ResponseWriter, req *http.Request) {
@@ -480,6 +504,100 @@ func (apiv2 *APIv2) listAllMessages() ([]data.Message, error) {
 		return nil, err
 	}
 	return []data.Message(*messages), nil
+}
+
+func emailQualityInputFromMessage(message *data.Message) emailquality.EmailQualityInput {
+	input := emailquality.EmailQualityInput{
+		Headers: map[string][]string{},
+	}
+	if message == nil || message.Content == nil {
+		return input
+	}
+
+	input.Headers = message.Content.Headers
+	input.Subject = firstHeaderValue(message.Content.Headers, "Subject")
+
+	if htmlPart := findMessageContentByMIME(message, "text/html"); htmlPart != nil {
+		input.HTML = decodedContentBody(htmlPart)
+	}
+	if plainPart := findMessageContentByMIME(message, "text/plain"); plainPart != nil {
+		input.PlainText = decodedContentBody(plainPart)
+	}
+	return input
+}
+
+func findMessageContentByMIME(message *data.Message, mimeType string) *data.Content {
+	if message == nil {
+		return nil
+	}
+	if contentMatchesMIME(message.Content, mimeType) {
+		return message.Content
+	}
+	if message.Content != nil && message.Content.MIME != nil {
+		if part := findContentInMIME(message.Content.MIME, mimeType); part != nil {
+			return part
+		}
+	}
+	if message.MIME != nil {
+		return findContentInMIME(message.MIME, mimeType)
+	}
+	return nil
+}
+
+func findContentInMIME(mimeBody *data.MIMEBody, mimeType string) *data.Content {
+	if mimeBody == nil {
+		return nil
+	}
+	for _, part := range mimeBody.Parts {
+		if contentMatchesMIME(part, mimeType) {
+			return part
+		}
+		if part != nil && part.MIME != nil {
+			if nested := findContentInMIME(part.MIME, mimeType); nested != nil {
+				return nested
+			}
+		}
+	}
+	return nil
+}
+
+func contentMatchesMIME(content *data.Content, mimeType string) bool {
+	if content == nil || content.Headers == nil {
+		return false
+	}
+	contentType := firstHeaderValue(content.Headers, "Content-Type")
+	return strings.Contains(strings.ToLower(contentType), strings.ToLower(mimeType))
+}
+
+func firstHeaderValue(headers map[string][]string, name string) string {
+	for key, values := range headers {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
+}
+
+func decodedContentBody(content *data.Content) string {
+	if content == nil {
+		return ""
+	}
+	body := content.Body
+	encoding := strings.ToLower(strings.TrimSpace(firstHeaderValue(content.Headers, "Content-Transfer-Encoding")))
+	switch encoding {
+	case "base64":
+		compact := strings.NewReplacer("\r", "", "\n", "", "\t", "", " ", "").Replace(body)
+		decoded, err := base64.StdEncoding.DecodeString(compact)
+		if err == nil {
+			return string(decoded)
+		}
+	case "quoted-printable":
+		decoded, err := ioutil.ReadAll(quotedprintable.NewReader(strings.NewReader(body)))
+		if err == nil {
+			return string(decoded)
+		}
+	}
+	return body
 }
 
 func (apiv2 *APIv2) applyRetention() {

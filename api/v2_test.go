@@ -155,6 +155,40 @@ func TestSanitizeFolderNames(t *testing.T) {
 	}
 }
 
+func TestEmailQualityInputFromMessage(t *testing.T) {
+	message := &data.Message{
+		Content: &data.Content{
+			Headers: map[string][]string{
+				"Subject":      []string{"Quality check"},
+				"Content-Type": []string{"multipart/alternative"},
+			},
+		},
+		MIME: &data.MIMEBody{
+			Parts: []*data.Content{
+				{
+					Headers: map[string][]string{"Content-Type": []string{"text/plain"}},
+					Body:    "Plain fallback",
+				},
+				{
+					Headers: map[string][]string{"Content-Type": []string{"text/html"}},
+					Body:    "<p>HTML body</p>",
+				},
+			},
+		},
+	}
+
+	input := emailQualityInputFromMessage(message)
+	if input.Subject != "Quality check" {
+		t.Fatalf("expected subject Quality check, got %q", input.Subject)
+	}
+	if input.PlainText != "Plain fallback" {
+		t.Fatalf("expected plain text fallback, got %q", input.PlainText)
+	}
+	if input.HTML != "<p>HTML body</p>" {
+		t.Fatalf("expected HTML body, got %q", input.HTML)
+	}
+}
+
 func TestPageMessages(t *testing.T) {
 	messages := []data.Message{
 		newTestMessage("1", ""),
