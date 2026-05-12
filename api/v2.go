@@ -108,6 +108,7 @@ type settingsResponse struct {
 	MaildirPath     string   `json:"maildirPath"`
 	SettingsFile    string   `json:"settingsFile"`
 	DefaultFolders  []string `json:"defaultFolders"`
+	ForceDefaultInboxOnly bool `json:"forceDefaultInboxOnly"`
 	RequiresRestart bool     `json:"requiresRestart"`
 }
 
@@ -115,6 +116,7 @@ type updateSettingsRequest struct {
 	RetentionDays  int      `json:"retentionDays"`
 	StorageType    string   `json:"storageType"`
 	DefaultFolders []string `json:"defaultFolders"`
+	ForceDefaultInboxOnly *bool `json:"forceDefaultInboxOnly"`
 }
 
 const folderHeaderName = "X-MailHogPlus-Folder"
@@ -405,6 +407,7 @@ func (apiv2 *APIv2) getSettings(w http.ResponseWriter, req *http.Request) {
 		MaildirPath:     apiv2.config.MaildirPath,
 		SettingsFile:    apiv2.config.SettingsFile,
 		DefaultFolders:  sanitizeFolderNames(apiv2.config.DefaultFolders),
+		ForceDefaultInboxOnly: apiv2.config.ForceDefaultInboxOnly,
 		RequiresRestart: false,
 	}
 	if apiv2.config.ManagedStorage != nil {
@@ -463,6 +466,9 @@ func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
 	if in.DefaultFolders != nil {
 		apiv2.config.DefaultFolders = sanitizeFolderNames(in.DefaultFolders)
 	}
+	if in.ForceDefaultInboxOnly != nil {
+		apiv2.config.ForceDefaultInboxOnly = *in.ForceDefaultInboxOnly
+	}
 
 	if err := apiv2.config.SaveSettings(); err != nil {
 		w.WriteHeader(500)
@@ -474,6 +480,7 @@ func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
 		MaildirPath:     apiv2.config.MaildirPath,
 		SettingsFile:    apiv2.config.SettingsFile,
 		DefaultFolders:  sanitizeFolderNames(apiv2.config.DefaultFolders),
+		ForceDefaultInboxOnly: apiv2.config.ForceDefaultInboxOnly,
 		RequiresRestart: requiresRestart,
 	}
 	b, _ := json.Marshal(res)

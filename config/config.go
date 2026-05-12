@@ -33,6 +33,7 @@ func DefaultConfig() *Config {
 		SettingsFile:   "mailhogplus-settings.json",
 		RetentionDays:  10,
 		DefaultFolders: []string{},
+		ForceDefaultInboxOnly: false,
 	}
 }
 
@@ -58,6 +59,7 @@ type Config struct {
 	SettingsFile     string
 	RetentionDays    int
 	DefaultFolders   []string
+	ForceDefaultInboxOnly bool
 	ManagedStorage   *ManagedStorage
 	settingsMu       sync.RWMutex
 }
@@ -80,6 +82,7 @@ type persistedSettings struct {
 	RetentionDays  int      `json:"retentionDays"`
 	StorageType    string   `json:"storageType"`
 	DefaultFolders []string `json:"defaultFolders"`
+	ForceDefaultInboxOnly bool `json:"forceDefaultInboxOnly"`
 }
 
 // Jim is a monkey
@@ -155,6 +158,7 @@ func RegisterFlags() {
 	flag.StringVar(&cfg.OutgoingSMTPFile, "outgoing-smtp", envconf.FromEnvP("MH_OUTGOING_SMTP", "").(string), "JSON file containing outgoing SMTP servers")
 	flag.StringVar(&cfg.SettingsFile, "settings-file", envconf.FromEnvP("MH_SETTINGS_FILE", "mailhogplus-settings.json").(string), "Settings JSON path (retention and server behavior)")
 	flag.IntVar(&cfg.RetentionDays, "retention-days", envconf.FromEnvP("MH_RETENTION_DAYS", 10).(int), "Message retention period in days (default 10)")
+	flag.BoolVar(&cfg.ForceDefaultInboxOnly, "force-default-inbox-only", envconf.FromEnvP("MH_FORCE_DEFAULT_INBOX_ONLY", false).(bool), "Reject SMTP auth usernames that are not in default inbox folders")
 	Jim.RegisterFlags()
 }
 
@@ -185,6 +189,7 @@ func (cfg *Config) loadSettings() {
 		cfg.StorageType = s.StorageType
 	}
 	cfg.DefaultFolders = sanitizeFolderNames(s.DefaultFolders)
+	cfg.ForceDefaultInboxOnly = s.ForceDefaultInboxOnly
 }
 
 func (cfg *Config) SaveSettings() error {
@@ -195,6 +200,7 @@ func (cfg *Config) SaveSettings() error {
 		RetentionDays:  cfg.RetentionDays,
 		StorageType:    cfg.StorageType,
 		DefaultFolders: sanitizeFolderNames(cfg.DefaultFolders),
+		ForceDefaultInboxOnly: cfg.ForceDefaultInboxOnly,
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -228,4 +234,20 @@ func sanitizeFolderNames(folders []string) []string {
 		return []string{}
 	}
 	return cleaned
+}
+
+func (cfg *Config) IsFolderAllowed(folder string) bool {
+	if !cfg.ForceDefaultInboxOnly {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(folder))
+	if normalized == "" {
+		return false
+	}
+	for _, allowed := range cfg.DefaultFolders {
+		if strings.ToLower(strings.TrimSpace(allowed)) == normalized {
+			return true
+		}
+	}
+	return false
 }

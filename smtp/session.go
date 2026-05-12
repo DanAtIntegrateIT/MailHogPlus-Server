@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ian-kent/linkio"
+	"github.com/mailhog/MailHog-Server/config"
 	"github.com/mailhog/MailHog-Server/monkey"
 	"github.com/mailhog/data"
 	"github.com/mailhog/smtp"
@@ -30,13 +31,14 @@ type Session struct {
 	writer io.Writer
 	monkey monkey.ChaosMonkey
 
+	config *config.Config
 	authenticatedUsername string
 }
 
 const folderHeaderName = "X-MailHogPlus-Folder"
 
 // Accept starts a new SMTP session using io.ReadWriteCloser
-func Accept(remoteAddress string, conn io.ReadWriteCloser, storage storage.Storage, messageChan chan *data.Message, hostname string, monkey monkey.ChaosMonkey) {
+func Accept(remoteAddress string, conn io.ReadWriteCloser, cfg *config.Config, storage storage.Storage, messageChan chan *data.Message, hostname string, monkey monkey.ChaosMonkey) {
 	defer conn.Close()
 
 	proto := smtp.NewProtocol()
@@ -65,6 +67,7 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, storage storage.Stora
 		reader:        reader,
 		writer:        writer,
 		monkey:        monkey,
+		config:        cfg,
 	}
 	proto.LogHandler = session.logf
 	proto.MessageReceivedHandler = session.acceptMessage
@@ -92,7 +95,11 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 			return smtp.ReplyUnrecognisedCommand(), false
 		}
 	}
-	if username := extractAuthenticatedUsername(mechanism, args...); len(username) > 0 {
+	username := extractAuthenticatedUsername(mechanism, args...)
+	if c.config != nil && !c.config.IsFolderAllowed(username) {
+		return smtp.ReplyInvalidAuth(), false
+	}
+	if len(username) > 0 {
 		c.authenticatedUsername = username
 	}
 	return nil, true
