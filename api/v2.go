@@ -98,16 +98,18 @@ type foldersResponse struct {
 }
 
 type settingsResponse struct {
-	RetentionDays   int    `json:"retentionDays"`
-	StorageType     string `json:"storageType"`
-	MaildirPath     string `json:"maildirPath"`
-	SettingsFile    string `json:"settingsFile"`
-	RequiresRestart bool   `json:"requiresRestart"`
+	RetentionDays   int      `json:"retentionDays"`
+	StorageType     string   `json:"storageType"`
+	MaildirPath     string   `json:"maildirPath"`
+	SettingsFile    string   `json:"settingsFile"`
+	DefaultFolders  []string `json:"defaultFolders"`
+	RequiresRestart bool     `json:"requiresRestart"`
 }
 
 type updateSettingsRequest struct {
-	RetentionDays int    `json:"retentionDays"`
-	StorageType   string `json:"storageType"`
+	RetentionDays  int      `json:"retentionDays"`
+	StorageType    string   `json:"storageType"`
+	DefaultFolders []string `json:"defaultFolders"`
 }
 
 const folderHeaderName = "X-MailHogPlus-Folder"
@@ -265,26 +267,7 @@ func (apiv2 *APIv2) folders(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		panic(err)
 	}
-
-	countByFolder := map[string]int{}
-	for _, m := range messages {
-		folder := folderFromMessage(m)
-		if len(folder) == 0 {
-			continue
-		}
-		countByFolder[folder]++
-	}
-
-	items := make([]folderResult, 0, len(countByFolder))
-	for name, count := range countByFolder {
-		items = append(items, folderResult{
-			Name:  name,
-			Count: count,
-		})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
-	})
+	items := folderResults(messages, apiv2.config.DefaultFolders)
 
 	res := foldersResponse{
 		Count: len(items),
@@ -397,6 +380,7 @@ func (apiv2 *APIv2) getSettings(w http.ResponseWriter, req *http.Request) {
 		StorageType:     apiv2.config.StorageType,
 		MaildirPath:     apiv2.config.MaildirPath,
 		SettingsFile:    apiv2.config.SettingsFile,
+		DefaultFolders:  sanitizeFolderNames(apiv2.config.DefaultFolders),
 		RequiresRestart: false,
 	}
 	if apiv2.config.ManagedStorage != nil {
@@ -452,6 +436,9 @@ func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
 			requiresRestart = true
 		}
 	}
+	if in.DefaultFolders != nil {
+		apiv2.config.DefaultFolders = sanitizeFolderNames(in.DefaultFolders)
+	}
 
 	if err := apiv2.config.SaveSettings(); err != nil {
 		w.WriteHeader(500)
@@ -462,6 +449,7 @@ func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
 		StorageType:     apiv2.config.StorageType,
 		MaildirPath:     apiv2.config.MaildirPath,
 		SettingsFile:    apiv2.config.SettingsFile,
+		DefaultFolders:  sanitizeFolderNames(apiv2.config.DefaultFolders),
 		RequiresRestart: requiresRestart,
 	}
 	b, _ := json.Marshal(res)
@@ -504,20 +492,59 @@ func (apiv2 *APIv2) applyRetention() {
 }
 
 func filterMessagesByFolder(messages []data.Message, folder string) []data.Message {
+	normalizedFolder := normalizeFolder(folder)
 	filtered := make([]data.Message, 0, len(messages))
 	for _, m := range messages {
-		msgFolder := folderFromMessage(m)
-		if folder == "" {
-			if msgFolder == "" {
+		normalizedMessageFolder := normalizeFolder(folderFromMessage(m))
+		if normalizedFolder == "" {
+			if normalizedMessageFolder == "" {
 				filtered = append(filtered, m)
 			}
 			continue
 		}
-		if msgFolder == folder {
+		if normalizedMessageFolder == normalizedFolder {
 			filtered = append(filtered, m)
 		}
 	}
 	return filtered
+}
+
+func folderResults(messages []data.Message, defaultFolders []string) []folderResult {
+	items := make([]folderResult, 0)
+	indexByNormalizedName := map[string]int{}
+
+	addFolder := func(folder string, count int) {
+		folder = strings.TrimSpace(folder)
+		normalizedFolder := normalizeFolder(folder)
+		if normalizedFolder == "" {
+			return
+		}
+
+		if idx, ok := indexByNormalizedName[normalizedFolder]; ok {
+			items[idx].Count += count
+			return
+		}
+
+		indexByNormalizedName[normalizedFolder] = len(items)
+		items = append(items, folderResult{
+			Name:  folder,
+			Count: count,
+		})
+	}
+
+	for _, folder := range sanitizeFolderNames(defaultFolders) {
+		addFolder(folder, 0)
+	}
+
+	for _, m := range messages {
+		addFolder(folderFromMessage(m), 1)
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+
+	return items
 }
 
 func folderFromMessage(message data.Message) string {
@@ -533,6 +560,28 @@ func folderFromMessage(message data.Message) string {
 		}
 	}
 	return ""
+}
+
+func normalizeFolder(folder string) string {
+	return strings.ToLower(strings.TrimSpace(folder))
+}
+
+func sanitizeFolderNames(folders []string) []string {
+	cleaned := make([]string, 0, len(folders))
+	seen := map[string]bool{}
+	for _, folder := range folders {
+		name := strings.TrimSpace(folder)
+		normalized := normalizeFolder(name)
+		if len(normalized) == 0 || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		cleaned = append(cleaned, name)
+	}
+	if len(cleaned) == 0 {
+		return []string{}
+	}
+	return cleaned
 }
 
 func pageMessages(messages []data.Message, start, limit int) []data.Message {

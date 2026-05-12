@@ -18,20 +18,21 @@ import (
 // DefaultConfig is the default config
 func DefaultConfig() *Config {
 	return &Config{
-		SMTPBindAddr:  "0.0.0.0:1025",
-		APIBindAddr:   "0.0.0.0:8025",
-		Hostname:      "mailhog.example",
-		MongoURI:      "127.0.0.1:27017",
-		MongoDb:       "mailhog",
-		MongoColl:     "messages",
-		MaildirPath:   "mailhogplus-data",
-		StorageType:   "maildir",
-		CORSOrigin:    "",
-		WebPath:       "",
-		MessageChan:   make(chan *data.Message),
-		OutgoingSMTP:  make(map[string]*OutgoingSMTP),
-		SettingsFile:  "mailhogplus-settings.json",
-		RetentionDays: 10,
+		SMTPBindAddr:   "0.0.0.0:1025",
+		APIBindAddr:    "0.0.0.0:8025",
+		Hostname:       "mailhog.example",
+		MongoURI:       "127.0.0.1:27017",
+		MongoDb:        "mailhog",
+		MongoColl:      "messages",
+		MaildirPath:    "mailhogplus-data",
+		StorageType:    "maildir",
+		CORSOrigin:     "",
+		WebPath:        "",
+		MessageChan:    make(chan *data.Message),
+		OutgoingSMTP:   make(map[string]*OutgoingSMTP),
+		SettingsFile:   "mailhogplus-settings.json",
+		RetentionDays:  10,
+		DefaultFolders: []string{},
 	}
 }
 
@@ -56,6 +57,7 @@ type Config struct {
 	WebPath          string
 	SettingsFile     string
 	RetentionDays    int
+	DefaultFolders   []string
 	ManagedStorage   *ManagedStorage
 	settingsMu       sync.RWMutex
 }
@@ -75,8 +77,9 @@ type OutgoingSMTP struct {
 var cfg = DefaultConfig()
 
 type persistedSettings struct {
-	RetentionDays int    `json:"retentionDays"`
-	StorageType   string `json:"storageType"`
+	RetentionDays  int      `json:"retentionDays"`
+	StorageType    string   `json:"storageType"`
+	DefaultFolders []string `json:"defaultFolders"`
 }
 
 // Jim is a monkey
@@ -181,6 +184,7 @@ func (cfg *Config) loadSettings() {
 	if isValidStorageType(s.StorageType) {
 		cfg.StorageType = s.StorageType
 	}
+	cfg.DefaultFolders = sanitizeFolderNames(s.DefaultFolders)
 }
 
 func (cfg *Config) SaveSettings() error {
@@ -188,8 +192,9 @@ func (cfg *Config) SaveSettings() error {
 	defer cfg.settingsMu.Unlock()
 
 	s := persistedSettings{
-		RetentionDays: cfg.RetentionDays,
-		StorageType:   cfg.StorageType,
+		RetentionDays:  cfg.RetentionDays,
+		StorageType:    cfg.StorageType,
+		DefaultFolders: sanitizeFolderNames(cfg.DefaultFolders),
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -205,4 +210,22 @@ func isValidStorageType(value string) bool {
 	default:
 		return false
 	}
+}
+
+func sanitizeFolderNames(folders []string) []string {
+	cleaned := make([]string, 0, len(folders))
+	seen := map[string]bool{}
+	for _, folder := range folders {
+		name := strings.TrimSpace(folder)
+		normalized := strings.ToLower(name)
+		if len(normalized) == 0 || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		cleaned = append(cleaned, name)
+	}
+	if len(cleaned) == 0 {
+		return []string{}
+	}
+	return cleaned
 }

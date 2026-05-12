@@ -190,10 +190,19 @@ func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
 
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+id+"-part-"+part+"\"")
 
-	message, _ := apiv1.config.Storage.Load(id)
+	message, err := apiv1.config.Storage.Load(id)
+	if err != nil || message == nil {
+		w.WriteHeader(404)
+		return
+	}
+	targetPart, ok := getMIMEPartByPath(message, part)
+	if !ok || targetPart == nil {
+		w.WriteHeader(404)
+		return
+	}
+
 	contentTransferEncoding := ""
-	pid, _ := strconv.Atoi(part)
-	for h, l := range message.MIME.Parts[pid].Headers {
+	for h, l := range targetPart.Headers {
 		for _, v := range l {
 			switch strings.ToLower(h) {
 			case "content-disposition":
@@ -209,15 +218,41 @@ func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	}
-	body := []byte(message.MIME.Parts[pid].Body)
+	body := []byte(targetPart.Body)
 	if strings.ToLower(contentTransferEncoding) == "base64" {
 		var e error
-		body, e = base64.StdEncoding.DecodeString(message.MIME.Parts[pid].Body)
+		body, e = base64.StdEncoding.DecodeString(targetPart.Body)
 		if e != nil {
 			log.Printf("[APIv1] Decoding base64 encoded body failed: %s", e)
 		}
 	}
 	w.Write(body)
+}
+
+func getMIMEPartByPath(message *data.Message, partPath string) (*data.Content, bool) {
+	if message == nil || message.MIME == nil || len(partPath) == 0 {
+		return nil, false
+	}
+
+	segments := strings.Split(partPath, ".")
+	var currentParts []*data.Content = message.MIME.Parts
+	var current *data.Content
+
+	for i := 0; i < len(segments); i++ {
+		pid, err := strconv.Atoi(strings.TrimSpace(segments[i]))
+		if err != nil || pid < 0 || pid >= len(currentParts) {
+			return nil, false
+		}
+		current = currentParts[pid]
+		if i < len(segments)-1 {
+			if current == nil || current.MIME == nil {
+				return nil, false
+			}
+			currentParts = current.MIME.Parts
+		}
+	}
+
+	return current, current != nil
 }
 
 func (apiv1 *APIv1) delete_all(w http.ResponseWriter, req *http.Request) {
