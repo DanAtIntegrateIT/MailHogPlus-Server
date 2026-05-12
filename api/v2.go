@@ -103,20 +103,22 @@ type foldersResponse struct {
 }
 
 type settingsResponse struct {
-	RetentionDays   int      `json:"retentionDays"`
-	StorageType     string   `json:"storageType"`
-	MaildirPath     string   `json:"maildirPath"`
-	SettingsFile    string   `json:"settingsFile"`
-	DefaultFolders  []string `json:"defaultFolders"`
-	ForceDefaultInboxOnly bool `json:"forceDefaultInboxOnly"`
-	RequiresRestart bool     `json:"requiresRestart"`
+	RetentionDays         int                   `json:"retentionDays"`
+	StorageType           string                `json:"storageType"`
+	MaildirPath           string                `json:"maildirPath"`
+	SettingsFile          string                `json:"settingsFile"`
+	DefaultFolders        []string              `json:"defaultFolders"`
+	ForceDefaultInboxOnly bool                  `json:"forceDefaultInboxOnly"`
+	OutgoingSMTP          []config.OutgoingSMTP `json:"outgoingSMTP"`
+	RequiresRestart       bool                  `json:"requiresRestart"`
 }
 
 type updateSettingsRequest struct {
-	RetentionDays  int      `json:"retentionDays"`
-	StorageType    string   `json:"storageType"`
-	DefaultFolders []string `json:"defaultFolders"`
-	ForceDefaultInboxOnly *bool `json:"forceDefaultInboxOnly"`
+	RetentionDays         int                   `json:"retentionDays"`
+	StorageType           string                `json:"storageType"`
+	DefaultFolders        []string              `json:"defaultFolders"`
+	ForceDefaultInboxOnly *bool                 `json:"forceDefaultInboxOnly"`
+	OutgoingSMTP          []config.OutgoingSMTP `json:"outgoingSMTP"`
 }
 
 const folderHeaderName = "X-MailHogPlus-Folder"
@@ -396,7 +398,7 @@ func (apiv2 *APIv2) listOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
 
 	apiv2.defaultOptions(w, req)
 
-	b, _ := json.Marshal(apiv2.config.OutgoingSMTP)
+	b, _ := json.Marshal(config.SanitizeOutgoingSMTPMap(apiv2.config.OutgoingSMTP))
 	w.Header().Add("Content-Type", "application/json")
 	w.Write(b)
 }
@@ -406,13 +408,14 @@ func (apiv2 *APIv2) getSettings(w http.ResponseWriter, req *http.Request) {
 	apiv2.defaultOptions(w, req)
 
 	res := settingsResponse{
-		RetentionDays:   apiv2.config.RetentionDays,
-		StorageType:     apiv2.config.StorageType,
-		MaildirPath:     apiv2.config.MaildirPath,
-		SettingsFile:    apiv2.config.SettingsFile,
-		DefaultFolders:  sanitizeFolderNames(apiv2.config.DefaultFolders),
+		RetentionDays:         apiv2.config.RetentionDays,
+		StorageType:           apiv2.config.StorageType,
+		MaildirPath:           apiv2.config.MaildirPath,
+		SettingsFile:          apiv2.config.SettingsFile,
+		DefaultFolders:        sanitizeFolderNames(apiv2.config.DefaultFolders),
+		OutgoingSMTP:          config.OutgoingSMTPList(apiv2.config.OutgoingSMTP),
 		ForceDefaultInboxOnly: apiv2.config.ForceDefaultInboxOnly,
-		RequiresRestart: false,
+		RequiresRestart:       false,
 	}
 	if apiv2.config.ManagedStorage != nil {
 		res.RetentionDays = apiv2.config.ManagedStorage.RetentionDays()
@@ -473,19 +476,23 @@ func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
 	if in.ForceDefaultInboxOnly != nil {
 		apiv2.config.ForceDefaultInboxOnly = *in.ForceDefaultInboxOnly
 	}
+	if in.OutgoingSMTP != nil {
+		apiv2.config.OutgoingSMTP = config.OutgoingSMTPMapFromList(in.OutgoingSMTP)
+	}
 
 	if err := apiv2.config.SaveSettings(); err != nil {
 		w.WriteHeader(500)
 		return
 	}
 	res := settingsResponse{
-		RetentionDays:   apiv2.config.RetentionDays,
-		StorageType:     apiv2.config.StorageType,
-		MaildirPath:     apiv2.config.MaildirPath,
-		SettingsFile:    apiv2.config.SettingsFile,
-		DefaultFolders:  sanitizeFolderNames(apiv2.config.DefaultFolders),
+		RetentionDays:         apiv2.config.RetentionDays,
+		StorageType:           apiv2.config.StorageType,
+		MaildirPath:           apiv2.config.MaildirPath,
+		SettingsFile:          apiv2.config.SettingsFile,
+		DefaultFolders:        sanitizeFolderNames(apiv2.config.DefaultFolders),
+		OutgoingSMTP:          config.OutgoingSMTPList(apiv2.config.OutgoingSMTP),
 		ForceDefaultInboxOnly: apiv2.config.ForceDefaultInboxOnly,
-		RequiresRestart: requiresRestart,
+		RequiresRestart:       requiresRestart,
 	}
 	b, _ := json.Marshal(res)
 	w.Header().Add("Content-Type", "application/json")

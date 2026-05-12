@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -18,50 +19,50 @@ import (
 // DefaultConfig is the default config
 func DefaultConfig() *Config {
 	return &Config{
-		SMTPBindAddr:   "0.0.0.0:1025",
-		APIBindAddr:    "0.0.0.0:8025",
-		Hostname:       "mailhog.example",
-		MongoURI:       "127.0.0.1:27017",
-		MongoDb:        "mailhog",
-		MongoColl:      "messages",
-		MaildirPath:    "mailhogplus-data",
-		StorageType:    "maildir",
-		CORSOrigin:     "",
-		WebPath:        "",
-		MessageChan:    make(chan *data.Message),
-		OutgoingSMTP:   make(map[string]*OutgoingSMTP),
-		SettingsFile:   "mailhogplus-settings.json",
-		RetentionDays:  10,
-		DefaultFolders: []string{},
+		SMTPBindAddr:          "0.0.0.0:1025",
+		APIBindAddr:           "0.0.0.0:8025",
+		Hostname:              "mailhog.example",
+		MongoURI:              "127.0.0.1:27017",
+		MongoDb:               "mailhog",
+		MongoColl:             "messages",
+		MaildirPath:           "mailhogplus-data",
+		StorageType:           "maildir",
+		CORSOrigin:            "",
+		WebPath:               "",
+		MessageChan:           make(chan *data.Message),
+		OutgoingSMTP:          make(map[string]*OutgoingSMTP),
+		SettingsFile:          "mailhogplus-settings.json",
+		RetentionDays:         10,
+		DefaultFolders:        []string{},
 		ForceDefaultInboxOnly: false,
 	}
 }
 
 // Config is the config, kind of
 type Config struct {
-	SMTPBindAddr     string
-	APIBindAddr      string
-	Hostname         string
-	MongoURI         string
-	MongoDb          string
-	MongoColl        string
-	StorageType      string
-	CORSOrigin       string
-	MaildirPath      string
-	InviteJim        bool
-	Storage          storage.Storage
-	MessageChan      chan *data.Message
-	Assets           func(asset string) ([]byte, error)
-	Monkey           monkey.ChaosMonkey
-	OutgoingSMTPFile string
-	OutgoingSMTP     map[string]*OutgoingSMTP
-	WebPath          string
-	SettingsFile     string
-	RetentionDays    int
-	DefaultFolders   []string
+	SMTPBindAddr          string
+	APIBindAddr           string
+	Hostname              string
+	MongoURI              string
+	MongoDb               string
+	MongoColl             string
+	StorageType           string
+	CORSOrigin            string
+	MaildirPath           string
+	InviteJim             bool
+	Storage               storage.Storage
+	MessageChan           chan *data.Message
+	Assets                func(asset string) ([]byte, error)
+	Monkey                monkey.ChaosMonkey
+	OutgoingSMTPFile      string
+	OutgoingSMTP          map[string]*OutgoingSMTP
+	WebPath               string
+	SettingsFile          string
+	RetentionDays         int
+	DefaultFolders        []string
 	ForceDefaultInboxOnly bool
-	ManagedStorage   *ManagedStorage
-	settingsMu       sync.RWMutex
+	ManagedStorage        *ManagedStorage
+	settingsMu            sync.RWMutex
 }
 
 // OutgoingSMTP is an outgoing SMTP server config
@@ -79,10 +80,11 @@ type OutgoingSMTP struct {
 var cfg = DefaultConfig()
 
 type persistedSettings struct {
-	RetentionDays  int      `json:"retentionDays"`
-	StorageType    string   `json:"storageType"`
-	DefaultFolders []string `json:"defaultFolders"`
-	ForceDefaultInboxOnly bool `json:"forceDefaultInboxOnly"`
+	RetentionDays         int                      `json:"retentionDays"`
+	StorageType           string                   `json:"storageType"`
+	DefaultFolders        []string                 `json:"defaultFolders"`
+	ForceDefaultInboxOnly bool                     `json:"forceDefaultInboxOnly"`
+	OutgoingSMTP          map[string]*OutgoingSMTP `json:"outgoingSMTP"`
 }
 
 // Jim is a monkey
@@ -137,8 +139,9 @@ func Configure() *Config {
 		if err != nil {
 			log.Fatal(err)
 		}
-		cfg.OutgoingSMTP = o
+		cfg.OutgoingSMTP = SanitizeOutgoingSMTPMap(o)
 	}
+	cfg.OutgoingSMTP = SanitizeOutgoingSMTPMap(cfg.OutgoingSMTP)
 
 	return cfg
 }
@@ -190,6 +193,7 @@ func (cfg *Config) loadSettings() {
 	}
 	cfg.DefaultFolders = sanitizeFolderNames(s.DefaultFolders)
 	cfg.ForceDefaultInboxOnly = s.ForceDefaultInboxOnly
+	cfg.OutgoingSMTP = SanitizeOutgoingSMTPMap(s.OutgoingSMTP)
 }
 
 func (cfg *Config) SaveSettings() error {
@@ -197,10 +201,11 @@ func (cfg *Config) SaveSettings() error {
 	defer cfg.settingsMu.Unlock()
 
 	s := persistedSettings{
-		RetentionDays:  cfg.RetentionDays,
-		StorageType:    cfg.StorageType,
-		DefaultFolders: sanitizeFolderNames(cfg.DefaultFolders),
+		RetentionDays:         cfg.RetentionDays,
+		StorageType:           cfg.StorageType,
+		DefaultFolders:        sanitizeFolderNames(cfg.DefaultFolders),
 		ForceDefaultInboxOnly: cfg.ForceDefaultInboxOnly,
+		OutgoingSMTP:          SanitizeOutgoingSMTPMap(cfg.OutgoingSMTP),
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -234,6 +239,91 @@ func sanitizeFolderNames(folders []string) []string {
 		return []string{}
 	}
 	return cleaned
+}
+
+// SanitizeOutgoingSMTPMap removes invalid outgoing SMTP entries and normalizes values.
+func SanitizeOutgoingSMTPMap(servers map[string]*OutgoingSMTP) map[string]*OutgoingSMTP {
+	cleaned := make(map[string]*OutgoingSMTP)
+	for name, server := range servers {
+		normalized := normalizeOutgoingSMTPServer(name, server)
+		if normalized == nil {
+			continue
+		}
+		cleaned[normalized.Name] = normalized
+	}
+	return cleaned
+}
+
+// OutgoingSMTPMapFromList converts a list of outgoing SMTP servers into a name-keyed map.
+func OutgoingSMTPMapFromList(servers []OutgoingSMTP) map[string]*OutgoingSMTP {
+	cleaned := make(map[string]*OutgoingSMTP)
+	for i := range servers {
+		normalized := normalizeOutgoingSMTPServer("", &servers[i])
+		if normalized == nil {
+			continue
+		}
+		cleaned[normalized.Name] = normalized
+	}
+	return cleaned
+}
+
+// OutgoingSMTPList converts a name-keyed outgoing SMTP map into a sorted list.
+func OutgoingSMTPList(servers map[string]*OutgoingSMTP) []OutgoingSMTP {
+	cleanedMap := SanitizeOutgoingSMTPMap(servers)
+	cleanedList := make([]OutgoingSMTP, 0, len(cleanedMap))
+	for _, server := range cleanedMap {
+		if server == nil {
+			continue
+		}
+		cleanedList = append(cleanedList, *server)
+	}
+	sort.Slice(cleanedList, func(i, j int) bool {
+		return strings.ToLower(cleanedList[i].Name) < strings.ToLower(cleanedList[j].Name)
+	})
+	return cleanedList
+}
+
+func normalizeOutgoingSMTPServer(fallbackName string, server *OutgoingSMTP) *OutgoingSMTP {
+	if server == nil {
+		return nil
+	}
+
+	name := strings.TrimSpace(server.Name)
+	if len(name) == 0 {
+		name = strings.TrimSpace(fallbackName)
+	}
+	host := strings.TrimSpace(server.Host)
+	port := strings.TrimSpace(server.Port)
+	if len(name) == 0 || len(host) == 0 || len(port) == 0 {
+		return nil
+	}
+
+	mechanism := strings.ToUpper(strings.TrimSpace(server.Mechanism))
+	switch mechanism {
+	case "", "NONE":
+		mechanism = "NONE"
+	case "PLAIN", "CRAMMD5":
+	default:
+		mechanism = "NONE"
+	}
+
+	username := strings.TrimSpace(server.Username)
+	password := server.Password
+	if mechanism == "NONE" {
+		username = ""
+		password = ""
+	}
+
+	return &OutgoingSMTP{
+		Name:      name,
+		Save:      false,
+		Email:     strings.TrimSpace(server.Email),
+		Host:      host,
+		Port:      port,
+		Username:  username,
+		Password:  password,
+		Mechanism: mechanism,
+	}
 }
 
 func (cfg *Config) IsFolderAllowed(folder string) bool {
