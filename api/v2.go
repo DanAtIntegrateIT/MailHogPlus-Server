@@ -870,11 +870,11 @@ func resolveLogFilePath() string {
 	if filepath.IsAbs(logFilePath) {
 		return logFilePath
 	}
-	exePath, err := os.Executable()
-	if err != nil || exePath == "" {
+	absPath, err := filepath.Abs(logFilePath)
+	if err != nil || absPath == "" {
 		return logFilePath
 	}
-	return filepath.Join(filepath.Dir(exePath), logFilePath)
+	return absPath
 }
 
 func (apiv2 *APIv2) listAllMessages() ([]data.Message, error) {

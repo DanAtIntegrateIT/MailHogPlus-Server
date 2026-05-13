@@ -49,11 +49,11 @@ func resolveLogFilePath() string {
 	if filepath.IsAbs(logFilePath) {
 		return logFilePath
 	}
-	exePath, err := os.Executable()
-	if err != nil || exePath == "" {
+	absPath, err := filepath.Abs(logFilePath)
+	if err != nil || absPath == "" {
 		return logFilePath
 	}
-	return filepath.Join(filepath.Dir(exePath), logFilePath)
+	return absPath
 }
 
 func rotateLogFileIfOlderThan(logFilePath string, maxAge time.Duration) error {
