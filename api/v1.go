@@ -264,11 +264,16 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 	apiv1.defaultOptions(w, req)
 
 	w.Header().Add("Content-Type", "text/json")
-	msg, _ := apiv1.config.Storage.Load(id)
+	msg, err := apiv1.config.Storage.Load(id)
+	if err != nil || msg == nil || msg.Content == nil {
+		log.Printf("Message not found for release: %s", id)
+		w.WriteHeader(404)
+		return
+	}
 
 	decoder := json.NewDecoder(req.Body)
 	var cfg ReleaseConfig
-	err := decoder.Decode(&cfg)
+	err = decoder.Decode(&cfg)
 	if err != nil {
 		log.Printf("Error decoding request body: %s", err)
 		w.WriteHeader(500)
@@ -308,13 +313,7 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 
 	log.Printf("Releasing to %s (via %s:%s)", cfg.Email, cfg.Host, cfg.Port)
 
-	bytes := make([]byte, 0)
-	for h, l := range msg.Content.Headers {
-		for _, v := range l {
-			bytes = append(bytes, []byte(h+": "+v+"\r\n")...)
-		}
-	}
-	bytes = append(bytes, []byte("\r\n"+msg.Content.Body)...)
+	bytes := buildReleaseMessageBytes(msg, cfg.Email)
 
 	releaseSMTPConfig := config.OutgoingSMTP(cfg)
 	err = sendOutgoingSMTPMessage(releaseSMTPConfig, "nobody@"+apiv1.config.Hostname, []string{cfg.Email}, bytes)
@@ -324,6 +323,33 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Printf("Message released successfully")
+}
+
+func buildReleaseMessageBytes(msg *data.Message, releaseRecipient string) []byte {
+	if msg == nil || msg.Content == nil {
+		return []byte{}
+	}
+
+	recipient := strings.TrimSpace(releaseRecipient)
+	bytes := make([]byte, 0)
+	for h, l := range msg.Content.Headers {
+		if strings.EqualFold(h, "To") {
+			if recipient == "" {
+				for _, v := range l {
+					bytes = append(bytes, []byte(h+": "+v+"\r\n")...)
+				}
+			}
+			continue
+		}
+		for _, v := range l {
+			bytes = append(bytes, []byte(h+": "+v+"\r\n")...)
+		}
+	}
+	if recipient != "" {
+		bytes = append(bytes, []byte("To: "+recipient+"\r\n")...)
+	}
+	bytes = append(bytes, []byte("\r\n"+msg.Content.Body)...)
+	return bytes
 }
 
 func (apiv1 *APIv1) delete_one(w http.ResponseWriter, req *http.Request) {

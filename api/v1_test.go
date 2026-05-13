@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mailhog/data"
@@ -67,5 +68,47 @@ func TestGetMIMEPartByPathInvalid(t *testing.T) {
 	}
 	if part, ok := getMIMEPartByPath(message, "abc"); ok || part != nil {
 		t.Fatalf("expected non-numeric path to fail")
+	}
+}
+
+func TestBuildReleaseMessageBytesReplacesToHeader(t *testing.T) {
+	msg := &data.Message{
+		Content: &data.Content{
+			Headers: map[string][]string{
+				"From": {"sender@example.com"},
+				"To":   {"original@example.com"},
+			},
+			Body: "hello",
+		},
+	}
+
+	out := string(buildReleaseMessageBytes(msg, "actual.recipient@example.com"))
+	if strings.Contains(out, "To: original@example.com\r\n") {
+		t.Fatalf("expected original To header to be replaced, got %q", out)
+	}
+	if !strings.Contains(out, "To: actual.recipient@example.com\r\n") {
+		t.Fatalf("expected release recipient To header, got %q", out)
+	}
+	if !strings.Contains(out, "From: sender@example.com\r\n") {
+		t.Fatalf("expected From header to be preserved, got %q", out)
+	}
+	if !strings.HasSuffix(out, "\r\nhello") {
+		t.Fatalf("expected body to be preserved, got %q", out)
+	}
+}
+
+func TestBuildReleaseMessageBytesKeepsOriginalToWhenNoRecipient(t *testing.T) {
+	msg := &data.Message{
+		Content: &data.Content{
+			Headers: map[string][]string{
+				"To": {"original@example.com"},
+			},
+			Body: "hello",
+		},
+	}
+
+	out := string(buildReleaseMessageBytes(msg, ""))
+	if !strings.Contains(out, "To: original@example.com\r\n") {
+		t.Fatalf("expected original To header to be preserved, got %q", out)
 	}
 }
