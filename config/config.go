@@ -116,7 +116,8 @@ func Configure() *Config {
 		log.Fatalf("Invalid storage type %s", cfg.StorageType)
 	}
 
-	cfg.ManagedStorage = NewManagedStorage(cfg.Storage, cfg.RetentionDays)
+	enableMemoryCache := strings.EqualFold(strings.TrimSpace(cfg.StorageType), "maildir")
+	cfg.ManagedStorage = NewManagedStorage(cfg.Storage, cfg.RetentionDays, enableMemoryCache)
 	cfg.Storage = cfg.ManagedStorage
 	if err := cfg.ManagedStorage.ApplyRetention(); err != nil {
 		log.Printf("Error applying startup retention policy: %s", err)
