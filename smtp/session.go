@@ -95,6 +95,7 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 	if c.monkey != nil {
 		ok := c.monkey.ValidAUTH(mechanism, args...)
 		if !ok {
+			c.logf("Rejecting AUTH: chaos monkey denied mechanism=%q", mechanism)
 			// FIXME better error?
 			return smtp.ReplyUnrecognisedCommand(), false
 		}
@@ -102,10 +103,12 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 	username := extractAuthenticatedUsername(mechanism, args...)
 	folder, _ := splitAuthenticatedUsername(username)
 	if c.config != nil && !c.config.IsFolderAllowed(folder) {
+		c.logf("Rejecting AUTH: folder not allowed username=%q folder=%q", username, folder)
 		return smtp.ReplyInvalidAuth(), false
 	}
 	if len(username) > 0 {
 		c.authenticatedUsername = username
+		c.logf("Accepted AUTH: username=%q folder=%q", username, folder)
 	}
 	return nil, true
 }
@@ -115,6 +118,7 @@ func (c *Session) smtpVerbFilter(verb string, args ...string) (errorReply *smtp.
 		return nil
 	}
 	if strings.EqualFold(verb, "MAIL") && len(strings.TrimSpace(c.authenticatedUsername)) == 0 {
+		c.logf("Rejecting MAIL: authentication required when force-default-inbox-only=true")
 		return smtp.ReplyInvalidAuth()
 	}
 	return nil
@@ -124,6 +128,7 @@ func (c *Session) validateRecipient(to string) bool {
 	if c.monkey != nil {
 		ok := c.monkey.ValidRCPT(to)
 		if !ok {
+			c.logf("Rejecting RCPT TO: chaos monkey denied recipient=%q", to)
 			return false
 		}
 	}
@@ -134,6 +139,7 @@ func (c *Session) validateSender(from string) bool {
 	if c.monkey != nil {
 		ok := c.monkey.ValidMAIL(from)
 		if !ok {
+			c.logf("Rejecting MAIL FROM: chaos monkey denied sender=%q", from)
 			return false
 		}
 	}

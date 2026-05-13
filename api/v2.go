@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -69,6 +71,8 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("GET").HandlerFunc(apiv2.getSettings)
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("PUT").HandlerFunc(apiv2.updateSettings)
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+	r.Path(conf.WebPath + "/api/v2/logs").Methods("GET").HandlerFunc(apiv2.logs)
+	r.Path(conf.WebPath + "/api/v2/logs").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/websocket").Methods("GET").HandlerFunc(apiv2.websocket)
 
@@ -133,6 +137,15 @@ type outgoingSMTPTestResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+type logsResponse struct {
+	Path       string   `json:"path"`
+	Lines      []string `json:"lines"`
+	Count      int      `json:"count"`
+	MaxLines   int      `json:"maxLines"`
+	Query      string   `json:"query"`
+	Configured bool     `json:"configured"`
 }
 
 const outgoingSMTPTestTimeout = 15 * time.Second
@@ -753,6 +766,90 @@ func (apiv2 *APIv2) broadcast(msg *data.Message) {
 	log.Println("[APIv2] BROADCAST /api/v2/websocket")
 
 	apiv2.wsHub.Broadcast(msg)
+}
+
+func (apiv2 *APIv2) logs(w http.ResponseWriter, req *http.Request) {
+	log.Println("[APIv2] GET /api/v2/logs")
+	apiv2.defaultOptions(w, req)
+	w.Header().Add("Content-Type", "application/json")
+
+	logFilePath := strings.TrimSpace(os.Getenv("MH_LOG_FILE"))
+	if logFilePath == "" {
+		logFilePath = "mailhogplus.log"
+	}
+
+	maxLines := 200
+	if n, e := strconv.Atoi(strings.TrimSpace(req.URL.Query().Get("lines"))); e == nil && n > 0 {
+		if n > 2000 {
+			n = 2000
+		}
+		maxLines = n
+	}
+	query := strings.TrimSpace(req.URL.Query().Get("query"))
+
+	matchedLines, err := tailLogLines(logFilePath, maxLines, query)
+	if err != nil {
+		w.WriteHeader(500)
+		b, _ := json.Marshal(map[string]string{"error": err.Error()})
+		w.Write(b)
+		return
+	}
+
+	res := logsResponse{
+		Path:       logFilePath,
+		Lines:      matchedLines,
+		Count:      len(matchedLines),
+		MaxLines:   maxLines,
+		Query:      query,
+		Configured: true,
+	}
+	b, _ := json.Marshal(res)
+	w.Write(b)
+}
+
+func tailLogLines(path string, maxLines int, query string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("unable to open log file %q: %s", path, err)
+	}
+	defer file.Close()
+
+	if maxLines <= 0 {
+		maxLines = 200
+	}
+	queryLower := strings.ToLower(strings.TrimSpace(query))
+
+	ring := make([]string, maxLines)
+	total := 0
+	idx := 0
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if queryLower != "" && !strings.Contains(strings.ToLower(line), queryLower) {
+			continue
+		}
+		ring[idx] = line
+		idx = (idx + 1) % maxLines
+		total++
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("unable to read log file %q: %s", path, err)
+	}
+
+	if total == 0 {
+		return []string{}, nil
+	}
+	if total <= maxLines {
+		return ring[:total], nil
+	}
+
+	out := make([]string, maxLines)
+	for i := 0; i < maxLines; i++ {
+		out[i] = ring[(idx+i)%maxLines]
+	}
+	return out, nil
 }
 
 func (apiv2 *APIv2) listAllMessages() ([]data.Message, error) {
