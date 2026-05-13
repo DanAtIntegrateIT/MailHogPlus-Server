@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -773,10 +774,7 @@ func (apiv2 *APIv2) logs(w http.ResponseWriter, req *http.Request) {
 	apiv2.defaultOptions(w, req)
 	w.Header().Add("Content-Type", "application/json")
 
-	logFilePath := strings.TrimSpace(os.Getenv("MH_LOG_FILE"))
-	if logFilePath == "" {
-		logFilePath = "mailhogplus.log"
-	}
+	logFilePath := resolveLogFilePath()
 
 	maxLines := 200
 	if n, e := strconv.Atoi(strings.TrimSpace(req.URL.Query().Get("lines"))); e == nil && n > 0 {
@@ -808,6 +806,18 @@ func (apiv2 *APIv2) logs(w http.ResponseWriter, req *http.Request) {
 }
 
 func tailLogLines(path string, maxLines int, query string) ([]string, error) {
+	if _, statErr := os.Stat(path); statErr != nil {
+		if os.IsNotExist(statErr) {
+			f, createErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if createErr != nil {
+				return nil, fmt.Errorf("unable to create log file %q: %s", path, createErr)
+			}
+			f.Close()
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("unable to access log file %q: %s", path, statErr)
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("unable to open log file %q: %s", path, err)
@@ -850,6 +860,21 @@ func tailLogLines(path string, maxLines int, query string) ([]string, error) {
 		out[i] = ring[(idx+i)%maxLines]
 	}
 	return out, nil
+}
+
+func resolveLogFilePath() string {
+	logFilePath := strings.TrimSpace(os.Getenv("MH_LOG_FILE"))
+	if logFilePath == "" {
+		logFilePath = "mailhogplus.log"
+	}
+	if filepath.IsAbs(logFilePath) {
+		return logFilePath
+	}
+	exePath, err := os.Executable()
+	if err != nil || exePath == "" {
+		return logFilePath
+	}
+	return filepath.Join(filepath.Dir(exePath), logFilePath)
 }
 
 func (apiv2 *APIv2) listAllMessages() ([]data.Message, error) {

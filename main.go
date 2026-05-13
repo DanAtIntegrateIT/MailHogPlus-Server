@@ -25,10 +25,7 @@ var comconf *comcfg.Config
 var exitCh chan int
 
 func configureLogging() {
-	logFilePath := os.Getenv("MH_LOG_FILE")
-	if logFilePath == "" {
-		logFilePath = "mailhogplus.log"
-	}
+	logFilePath := resolveLogFilePath()
 
 	if err := rotateLogFileIfOlderThan(logFilePath, 24*time.Hour); err != nil {
 		log.Printf("Unable to rotate log file %q: %s", logFilePath, err)
@@ -42,6 +39,21 @@ func configureLogging() {
 
 	stdlog.SetOutput(io.MultiWriter(os.Stdout, file))
 	log.Printf("Writing logs to %s", logFilePath)
+}
+
+func resolveLogFilePath() string {
+	logFilePath := os.Getenv("MH_LOG_FILE")
+	if logFilePath == "" {
+		logFilePath = "mailhogplus.log"
+	}
+	if filepath.IsAbs(logFilePath) {
+		return logFilePath
+	}
+	exePath, err := os.Executable()
+	if err != nil || exePath == "" {
+		return logFilePath
+	}
+	return filepath.Join(filepath.Dir(exePath), logFilePath)
 }
 
 func rotateLogFileIfOlderThan(logFilePath string, maxAge time.Duration) error {
