@@ -11,11 +11,13 @@ import (
 
 // ManagedStorage wraps a storage backend and applies retention policy.
 type ManagedStorage struct {
-	base          storage.Storage
-	cache         storage.Storage
-	cacheEnabled  bool
-	mu            sync.RWMutex
-	retentionDays int
+	base                  storage.Storage
+	cache                 storage.Storage
+	cacheEnabled          bool
+	mu                    sync.RWMutex
+	retentionDays         int
+	lastRetentionSweep    time.Time
+	retentionSweepInterval time.Duration
 }
 
 func NewManagedStorage(base storage.Storage, retentionDays int, enableMemoryCache bool) *ManagedStorage {
@@ -23,8 +25,9 @@ func NewManagedStorage(base storage.Storage, retentionDays int, enableMemoryCach
 		retentionDays = 10
 	}
 	m := &ManagedStorage{
-		base:          base,
-		retentionDays: retentionDays,
+		base:                   base,
+		retentionDays:          retentionDays,
+		retentionSweepInterval: time.Minute,
 	}
 	if enableMemoryCache {
 		m.cache = storage.CreateInMemory()
@@ -127,6 +130,7 @@ func (m *ManagedStorage) SetRetentionDays(days int) {
 	}
 	m.mu.Lock()
 	m.retentionDays = days
+	m.lastRetentionSweep = time.Time{}
 	m.mu.Unlock()
 }
 
@@ -143,17 +147,30 @@ func (m *ManagedStorage) ApplyRetention() error {
 	if m.retentionDays <= 0 {
 		return nil
 	}
+	now := time.Now()
+	if !m.lastRetentionSweep.IsZero() && now.Sub(m.lastRetentionSweep) < m.retentionSweepInterval {
+		return nil
+	}
 
-	total := m.base.Count()
+	var total int
+	var messageSource storage.Storage
+	if m.cacheEnabled {
+		total = m.cache.Count()
+		messageSource = m.cache
+	} else {
+		total = m.base.Count()
+		messageSource = m.base
+	}
 	if total == 0 {
 		if m.cacheEnabled {
 			_ = m.cache.DeleteAll()
 		}
+		m.lastRetentionSweep = now
 		return nil
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -m.retentionDays)
-	messages, err := m.base.List(0, total)
+	cutoff := now.AddDate(0, 0, -m.retentionDays)
+	messages, err := messageSource.List(0, total)
 	if err != nil {
 		return err
 	}
@@ -170,6 +187,7 @@ func (m *ManagedStorage) ApplyRetention() error {
 			}
 		}
 	}
+	m.lastRetentionSweep = now
 	return nil
 }
 
