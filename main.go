@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	stdlog "log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	gohttp "net/http"
@@ -38,9 +41,78 @@ func configureLogging() {
 		return
 	}
 
-	stdlog.SetOutput(io.MultiWriter(os.Stdout, file))
+	stdlog.SetOutput(&splitLogWriter{
+		stdout: os.Stdout,
+		file:   newMailEventLogWriter(file),
+	})
 	data.LogHandler = func(message string, args ...interface{}) {}
 	log.Printf("Writing logs to %s", logFilePath)
+}
+
+type splitLogWriter struct {
+	stdout io.Writer
+	file   io.Writer
+}
+
+func (w *splitLogWriter) Write(p []byte) (int, error) {
+	if w.stdout != nil {
+		if _, err := w.stdout.Write(p); err != nil {
+			return 0, err
+		}
+	}
+	if w.file != nil {
+		if _, err := w.file.Write(p); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+type mailEventLogWriter struct {
+	file io.Writer
+	mu   sync.Mutex
+	buf  []byte
+}
+
+func newMailEventLogWriter(file io.Writer) *mailEventLogWriter {
+	return &mailEventLogWriter{file: file, buf: make([]byte, 0, 1024)}
+}
+
+func (w *mailEventLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.buf = append(w.buf, p...)
+	for {
+		newline := bytes.IndexByte(w.buf, '\n')
+		if newline < 0 {
+			break
+		}
+		line := string(bytes.TrimRight(w.buf[:newline], "\r"))
+		if shouldPersistMailLogLine(line) {
+			if _, err := w.file.Write(append([]byte(line), '\n')); err != nil {
+				return 0, err
+			}
+		}
+		w.buf = w.buf[newline+1:]
+	}
+	return len(p), nil
+}
+
+func shouldPersistMailLogLine(line string) bool {
+	if strings.Contains(line, "MAIL accepted:") {
+		return true
+	}
+	if strings.Contains(line, "MAIL rejected:") {
+		return true
+	}
+	if strings.Contains(line, "AUTH rejected:") {
+		return true
+	}
+	if strings.Contains(line, "MAIL failed:") {
+		return true
+	}
+	return false
 }
 
 func resolveLogFilePath() string {
