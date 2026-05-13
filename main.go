@@ -17,6 +17,7 @@ import (
 	"github.com/mailhog/MailHog-Server/smtp"
 	"github.com/mailhog/MailHog-UI/assets"
 	comcfg "github.com/mailhog/MailHog/config"
+	"github.com/mailhog/data"
 	"github.com/mailhog/http"
 )
 
@@ -38,6 +39,7 @@ func configureLogging() {
 	}
 
 	stdlog.SetOutput(io.MultiWriter(os.Stdout, file))
+	data.LogHandler = func(message string, args ...interface{}) {}
 	log.Printf("Writing logs to %s", logFilePath)
 }
 

@@ -67,10 +67,8 @@ func createAPIv1(conf *config.Config, r *pat.Router) *APIv1 {
 		for {
 			select {
 			case msg := <-apiv1.messageChan:
-				log.Println("Got message in APIv1 event stream")
 				bytes, _ := json.MarshalIndent(msg, "", "  ")
 				json := string(bytes)
-				log.Printf("Sending content: %s\n", json)
 				apiv1.broadcast(json)
 			case <-keepaliveTicker:
 				apiv1.keepalive()
@@ -90,7 +88,6 @@ func (apiv1 *APIv1) defaultOptions(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv1 *APIv1) broadcast(json string) {
-	log.Println("[APIv1] BROADCAST /api/v1/events")
 	b := []byte(json)
 	stream.Notify("data", b)
 }
@@ -101,13 +98,10 @@ func (apiv1 *APIv1) broadcast(json string) {
 // connections. Without this it is possible for the server to become
 // unresponsive due to too many open files.
 func (apiv1 *APIv1) keepalive() {
-	log.Println("[APIv1] KEEPALIVE /api/v1/events")
 	stream.Notify("keepalive", []byte{})
 }
 
 func (apiv1 *APIv1) eventstream(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv1] GET /api/v1/events")
-
 	//apiv1.defaultOptions(session)
 	if len(apiv1.config.CORSOrigin) > 0 {
 		w.Header().Add("Access-Control-Allow-Origin", apiv1.config.CORSOrigin)
@@ -118,8 +112,6 @@ func (apiv1 *APIv1) eventstream(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv1 *APIv1) messages(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv1] GET /api/v1/messages")
-
 	apiv1.defaultOptions(w, req)
 
 	messages, err := apiv1.config.Storage.List(0, 1000)
@@ -135,7 +127,6 @@ func (apiv1 *APIv1) messages(w http.ResponseWriter, req *http.Request) {
 
 func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
-	log.Printf("[APIv1] GET /api/v1/messages/%s\n", id)
 
 	apiv1.defaultOptions(w, req)
 
@@ -159,7 +150,6 @@ func (apiv1 *APIv1) message(w http.ResponseWriter, req *http.Request) {
 
 func (apiv1 *APIv1) download(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
-	log.Printf("[APIv1] GET /api/v1/messages/%s\n", id)
 
 	apiv1.defaultOptions(w, req)
 
@@ -182,7 +172,6 @@ func (apiv1 *APIv1) download(w http.ResponseWriter, req *http.Request) {
 func (apiv1 *APIv1) download_part(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
 	part := req.URL.Query().Get(":part")
-	log.Printf("[APIv1] GET /api/v1/messages/%s/mime/part/%s/download\n", id, part)
 
 	// TODO extension from content-type?
 	apiv1.defaultOptions(w, req)
@@ -255,8 +244,6 @@ func getMIMEPartByPath(message *data.Message, partPath string) (*data.Content, b
 }
 
 func (apiv1 *APIv1) delete_all(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv1] POST /api/v1/messages")
-
 	apiv1.defaultOptions(w, req)
 
 	w.Header().Add("Content-Type", "text/json")
@@ -273,7 +260,6 @@ func (apiv1 *APIv1) delete_all(w http.ResponseWriter, req *http.Request) {
 
 func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
-	log.Printf("[APIv1] POST /api/v1/messages/%s/release\n", id)
 
 	apiv1.defaultOptions(w, req)
 
@@ -289,10 +275,6 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 		w.Write([]byte("Error decoding request body"))
 		return
 	}
-
-	log.Printf("%+v", cfg)
-
-	log.Printf("Got message: %s", msg.ID)
 
 	if cfg.Save {
 		if _, ok := apiv1.config.OutgoingSMTP[cfg.Name]; ok {
@@ -346,8 +328,6 @@ func (apiv1 *APIv1) release_one(w http.ResponseWriter, req *http.Request) {
 
 func (apiv1 *APIv1) delete_one(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
-
-	log.Printf("[APIv1] POST /api/v1/messages/%s/delete\n", id)
 
 	apiv1.defaultOptions(w, req)
 

@@ -81,7 +81,6 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 		for {
 			select {
 			case msg := <-apiv2.messageChan:
-				log.Println("Got message in APIv2 websocket channel")
 				apiv2.broadcast(msg)
 			}
 		}
@@ -179,8 +178,6 @@ func (apiv2 *APIv2) getStartLimit(w http.ResponseWriter, req *http.Request) (sta
 }
 
 func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/messages")
-
 	apiv2.defaultOptions(w, req)
 
 	start, limit := apiv2.getStartLimit(w, req)
@@ -216,8 +213,6 @@ func (apiv2 *APIv2) messages(w http.ResponseWriter, req *http.Request) {
 
 func (apiv2 *APIv2) messageQuality(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get(":id")
-	log.Printf("[APIv2] GET /api/v2/messages/%s/quality\n", id)
-
 	apiv2.defaultOptions(w, req)
 	w.Header().Add("Content-Type", "application/json")
 
@@ -234,8 +229,6 @@ func (apiv2 *APIv2) messageQuality(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) deleteMessages(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] DELETE /api/v2/messages")
-
 	apiv2.defaultOptions(w, req)
 	w.Header().Add("Content-Type", "application/json")
 
@@ -280,8 +273,6 @@ func (apiv2 *APIv2) deleteMessages(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/search")
-
 	apiv2.defaultOptions(w, req)
 
 	start, limit := apiv2.getStartLimit(w, req)
@@ -340,8 +331,6 @@ func (apiv2 *APIv2) search(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) folders(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/folders")
-
 	apiv2.defaultOptions(w, req)
 	apiv2.applyRetention()
 
@@ -362,8 +351,6 @@ func (apiv2 *APIv2) folders(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) jim(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/jim")
-
 	apiv2.defaultOptions(w, req)
 
 	if apiv2.config.Monkey == nil {
@@ -377,8 +364,6 @@ func (apiv2 *APIv2) jim(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) deleteJim(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] DELETE /api/v2/jim")
-
 	apiv2.defaultOptions(w, req)
 
 	if apiv2.config.Monkey == nil {
@@ -390,8 +375,6 @@ func (apiv2 *APIv2) deleteJim(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) createJim(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] POST /api/v2/jim")
-
 	apiv2.defaultOptions(w, req)
 
 	if apiv2.config.Monkey != nil {
@@ -428,8 +411,6 @@ func (apiv2 *APIv2) newJimFromBody(w http.ResponseWriter, req *http.Request) err
 }
 
 func (apiv2 *APIv2) updateJim(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] PUT /api/v2/jim")
-
 	apiv2.defaultOptions(w, req)
 
 	if apiv2.config.Monkey == nil {
@@ -444,8 +425,6 @@ func (apiv2 *APIv2) updateJim(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) listOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/outgoing-smtp")
-
 	apiv2.defaultOptions(w, req)
 
 	b, _ := json.Marshal(config.SanitizeOutgoingSMTPMap(apiv2.config.OutgoingSMTP))
@@ -454,7 +433,6 @@ func (apiv2 *APIv2) listOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) testOutgoingSMTP(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] POST /api/v2/outgoing-smtp/test")
 	apiv2.defaultOptions(w, req)
 	w.Header().Add("Content-Type", "application/json")
 
@@ -662,7 +640,6 @@ func writeOutgoingSMTPTestResponse(w http.ResponseWriter, status int, success bo
 }
 
 func (apiv2 *APIv2) getSettings(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/settings")
 	apiv2.defaultOptions(w, req)
 
 	res := settingsResponse{
@@ -685,7 +662,6 @@ func (apiv2 *APIv2) getSettings(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] PUT /api/v2/settings")
 	apiv2.defaultOptions(w, req)
 
 	body, err := ioutil.ReadAll(req.Body)
@@ -758,19 +734,14 @@ func (apiv2 *APIv2) updateSettings(w http.ResponseWriter, req *http.Request) {
 }
 
 func (apiv2 *APIv2) websocket(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/websocket")
-
 	apiv2.wsHub.Serve(w, req)
 }
 
 func (apiv2 *APIv2) broadcast(msg *data.Message) {
-	log.Println("[APIv2] BROADCAST /api/v2/websocket")
-
 	apiv2.wsHub.Broadcast(msg)
 }
 
 func (apiv2 *APIv2) logs(w http.ResponseWriter, req *http.Request) {
-	log.Println("[APIv2] GET /api/v2/logs")
 	apiv2.defaultOptions(w, req)
 	w.Header().Add("Content-Type", "application/json")
 

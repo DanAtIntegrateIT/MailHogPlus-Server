@@ -72,7 +72,7 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, cfg *config.Config, s
 		monkey:        monkey,
 		config:        cfg,
 	}
-	proto.LogHandler = session.logf
+	proto.LogHandler = func(message string, args ...interface{}) {}
 	proto.MessageReceivedHandler = session.acceptMessage
 	proto.ValidateSenderHandler = session.validateSender
 	proto.ValidateRecipientHandler = session.validateRecipient
@@ -80,7 +80,6 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, cfg *config.Config, s
 	proto.SMTPVerbFilter = session.smtpVerbFilter
 	proto.GetAuthenticationMechanismsHandler = func() []string { return []string{"PLAIN"} }
 
-	session.logf("Starting session")
 	session.Write(proto.Start())
 	for session.Read() == true {
 		if monkey != nil && monkey.Disconnect() {
@@ -88,14 +87,13 @@ func Accept(remoteAddress string, conn io.ReadWriteCloser, cfg *config.Config, s
 			break
 		}
 	}
-	session.logf("Session ended")
 }
 
 func (c *Session) validateAuthentication(mechanism string, args ...string) (errorReply *smtp.Reply, ok bool) {
 	if c.monkey != nil {
 		ok := c.monkey.ValidAUTH(mechanism, args...)
 		if !ok {
-			c.logf("Rejecting AUTH: chaos monkey denied mechanism=%q", mechanism)
+			c.logf("AUTH rejected: chaos monkey denied mechanism=%q", mechanism)
 			// FIXME better error?
 			return smtp.ReplyUnrecognisedCommand(), false
 		}
@@ -103,12 +101,11 @@ func (c *Session) validateAuthentication(mechanism string, args ...string) (erro
 	username := extractAuthenticatedUsername(mechanism, args...)
 	folder, _ := splitAuthenticatedUsername(username)
 	if c.config != nil && !c.config.IsFolderAllowed(folder) {
-		c.logf("Rejecting AUTH: folder not allowed username=%q folder=%q", username, folder)
+		c.logf("AUTH rejected: folder %q is not configured", folder)
 		return smtp.ReplyInvalidAuth(), false
 	}
 	if len(username) > 0 {
 		c.authenticatedUsername = username
-		c.logf("Accepted AUTH: username=%q folder=%q", username, folder)
 	}
 	return nil, true
 }
@@ -118,7 +115,7 @@ func (c *Session) smtpVerbFilter(verb string, args ...string) (errorReply *smtp.
 		return nil
 	}
 	if strings.EqualFold(verb, "MAIL") && len(strings.TrimSpace(c.authenticatedUsername)) == 0 {
-		c.logf("Rejecting MAIL: authentication required when force-default-inbox-only=true")
+		c.logf("MAIL rejected: authentication required when force-default-inbox-only=true")
 		return smtp.ReplyInvalidAuth()
 	}
 	return nil
@@ -128,7 +125,7 @@ func (c *Session) validateRecipient(to string) bool {
 	if c.monkey != nil {
 		ok := c.monkey.ValidRCPT(to)
 		if !ok {
-			c.logf("Rejecting RCPT TO: chaos monkey denied recipient=%q", to)
+			c.logf("RCPT rejected: chaos monkey denied recipient=%q", to)
 			return false
 		}
 	}
@@ -139,7 +136,7 @@ func (c *Session) validateSender(from string) bool {
 	if c.monkey != nil {
 		ok := c.monkey.ValidMAIL(from)
 		if !ok {
-			c.logf("Rejecting MAIL FROM: chaos monkey denied sender=%q", from)
+			c.logf("MAIL rejected: chaos monkey denied sender=%q", from)
 			return false
 		}
 	}
@@ -156,8 +153,12 @@ func (c *Session) acceptMessage(msg *data.SMTPMessage) (id string, err error) {
 	setFolderHeader(m, folder)
 	setTagHeaders(m, sanitizeTags(combinedTags))
 	persistMessageContentToRaw(m)
-	c.logf("Storing message %s", m.ID)
 	id, err = c.storage.Store(m)
+	if err != nil {
+		c.logf("MAIL failed: subject=%q folder=%q from=%q to=%q error=%q", messageSubject(m), folder, messageFromAddress(m), messageRecipientAddresses(m), err.Error())
+		return
+	}
+	c.logf("MAIL accepted: subject=%q folder=%q from=%q to=%q id=%s", messageSubject(m), folder, messageFromAddress(m), messageRecipientAddresses(m), id)
 	c.messageChan <- m
 	return
 }
@@ -327,6 +328,62 @@ func removeMessageHeader(m *data.Message, headerName string) {
 	}
 }
 
+func messageSubject(m *data.Message) string {
+	subject := firstMessageHeader(m, "Subject")
+	if subject == "" {
+		return "(no subject)"
+	}
+	return subject
+}
+
+func firstMessageHeader(m *data.Message, headerName string) string {
+	if m == nil || m.Content == nil || m.Content.Headers == nil {
+		return ""
+	}
+	for k, values := range m.Content.Headers {
+		if strings.EqualFold(k, headerName) && len(values) > 0 {
+			return strings.TrimSpace(values[0])
+		}
+	}
+	return ""
+}
+
+func messageFromAddress(m *data.Message) string {
+	if m == nil {
+		return ""
+	}
+	return pathAddress(m.From)
+}
+
+func messageRecipientAddresses(m *data.Message) string {
+	if m == nil || len(m.To) == 0 {
+		return ""
+	}
+	recipients := make([]string, 0, len(m.To))
+	for _, recipient := range m.To {
+		address := pathAddress(recipient)
+		if address != "" {
+			recipients = append(recipients, address)
+		}
+	}
+	return strings.Join(recipients, ",")
+}
+
+func pathAddress(path *data.Path) string {
+	if path == nil {
+		return ""
+	}
+	mailbox := strings.TrimSpace(path.Mailbox)
+	domain := strings.TrimSpace(path.Domain)
+	if mailbox == "" {
+		return ""
+	}
+	if domain == "" {
+		return mailbox
+	}
+	return mailbox + "@" + domain
+}
+
 func (c *Session) logf(message string, args ...interface{}) {
 	message = strings.Join([]string{"[SMTP %s]", message}, " ")
 	args = append([]interface{}{c.remoteAddress}, args...)
@@ -339,21 +396,16 @@ func (c *Session) Read() bool {
 	n, err := c.reader.Read(buf)
 
 	if n == 0 {
-		c.logf("Connection closed by remote host\n")
 		io.Closer(c.conn).Close() // not sure this is necessary?
 		return false
 	}
 
 	if err != nil {
-		c.logf("Error reading from socket: %s\n", err)
+		c.logf("Connection read error: %s", err)
 		return false
 	}
 
 	text := string(buf[0:n])
-	logText := strings.Replace(text, "\n", "\\n", -1)
-	logText = strings.Replace(logText, "\r", "\\r", -1)
-	c.logf("Received %d bytes: '%s'\n", n, logText)
-
 	c.line += text
 
 	for strings.Contains(c.line, "\r\n") {
@@ -376,9 +428,6 @@ func (c *Session) Read() bool {
 func (c *Session) Write(reply *smtp.Reply) {
 	lines := reply.Lines()
 	for _, l := range lines {
-		logText := strings.Replace(l, "\n", "\\n", -1)
-		logText = strings.Replace(logText, "\r", "\\r", -1)
-		c.logf("Sent %d bytes: '%s'", len(l), logText)
 		c.writer.Write([]byte(l))
 	}
 }
