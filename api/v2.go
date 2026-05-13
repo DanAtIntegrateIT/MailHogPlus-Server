@@ -49,6 +49,8 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("GET").HandlerFunc(apiv2.messages)
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("DELETE").HandlerFunc(apiv2.deleteMessages)
 	r.Path(conf.WebPath + "/api/v2/messages").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
+	r.Path(conf.WebPath + "/api/v2/messages/existing-ids").Methods("POST").HandlerFunc(apiv2.existingMessageIDs)
+	r.Path(conf.WebPath + "/api/v2/messages/existing-ids").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 	r.Path(conf.WebPath + "/api/v2/messages/{id}/quality").Methods("GET").HandlerFunc(apiv2.messageQuality)
 	r.Path(conf.WebPath + "/api/v2/messages/{id}/quality").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
@@ -131,6 +133,14 @@ type updateSettingsRequest struct {
 	DefaultFolders        []string              `json:"defaultFolders"`
 	ForceDefaultInboxOnly *bool                 `json:"forceDefaultInboxOnly"`
 	OutgoingSMTP          []config.OutgoingSMTP `json:"outgoingSMTP"`
+}
+
+type existingMessageIDsRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type existingMessageIDsResponse struct {
+	ExistingIDs []string `json:"existingIds"`
 }
 
 type outgoingSMTPTestResponse struct {
@@ -267,6 +277,42 @@ func (apiv2 *APIv2) deleteMessages(w http.ResponseWriter, req *http.Request) {
 	}
 
 	res := map[string]int{"deleted": deleted}
+	b, _ := json.Marshal(res)
+	w.WriteHeader(200)
+	w.Write(b)
+}
+
+func (apiv2 *APIv2) existingMessageIDs(w http.ResponseWriter, req *http.Request) {
+	apiv2.defaultOptions(w, req)
+	w.Header().Add("Content-Type", "application/json")
+
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	var in existingMessageIDsRequest
+	if err := json.Unmarshal(body, &in); err != nil {
+		w.WriteHeader(400)
+		return
+	}
+
+	existing := make([]string, 0, len(in.IDs))
+	seen := map[string]bool{}
+	for _, rawID := range in.IDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		msg, loadErr := apiv2.config.Storage.Load(id)
+		if loadErr == nil && msg != nil {
+			existing = append(existing, id)
+		}
+	}
+
+	res := existingMessageIDsResponse{ExistingIDs: existing}
 	b, _ := json.Marshal(res)
 	w.WriteHeader(200)
 	w.Write(b)
