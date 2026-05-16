@@ -75,6 +75,7 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("PUT").HandlerFunc(apiv2.updateSettings)
 	r.Path(conf.WebPath + "/api/v2/settings").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 	r.Path(conf.WebPath + "/api/v2/logs").Methods("GET").HandlerFunc(apiv2.logs)
+	r.Path(conf.WebPath + "/api/v2/logs").Methods("DELETE").HandlerFunc(apiv2.clearLogs)
 	r.Path(conf.WebPath + "/api/v2/logs").Methods("OPTIONS").HandlerFunc(apiv2.defaultOptions)
 
 	r.Path(conf.WebPath + "/api/v2/websocket").Methods("GET").HandlerFunc(apiv2.websocket)
@@ -822,6 +823,30 @@ func (apiv2 *APIv2) logs(w http.ResponseWriter, req *http.Request) {
 	w.Write(b)
 }
 
+func (apiv2 *APIv2) clearLogs(w http.ResponseWriter, req *http.Request) {
+	apiv2.defaultOptions(w, req)
+	w.Header().Add("Content-Type", "application/json")
+
+	logFilePath := resolveLogFilePath()
+	if err := truncateLogFile(logFilePath); err != nil {
+		w.WriteHeader(500)
+		b, _ := json.Marshal(map[string]string{"error": err.Error()})
+		w.Write(b)
+		return
+	}
+
+	res := logsResponse{
+		Path:       logFilePath,
+		Lines:      []string{},
+		Count:      0,
+		MaxLines:   0,
+		Query:      "",
+		Configured: true,
+	}
+	b, _ := json.Marshal(res)
+	w.Write(b)
+}
+
 func tailLogLines(path string, maxLines int, query string) ([]string, error) {
 	if _, statErr := os.Stat(path); statErr != nil {
 		if os.IsNotExist(statErr) {
@@ -877,6 +902,14 @@ func tailLogLines(path string, maxLines int, query string) ([]string, error) {
 		out[i] = ring[(idx+i)%maxLines]
 	}
 	return out, nil
+}
+
+func truncateLogFile(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("unable to clear log file %q: %s", path, err)
+	}
+	return file.Close()
 }
 
 func resolveLogFilePath() string {
